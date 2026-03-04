@@ -8,9 +8,11 @@ Trains both models on the same data split, then prints a comparison table.
 """
 
 import argparse
+import json
 import os
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -216,10 +218,10 @@ def train_afno(args, device, x_train, y_train, x_val, y_val) -> tuple:
     )
 
     model = AFNO(
-        img_size=(32, 64),
+        inp_shape=[32, 64],
         in_channels=1,
         out_channels=1,
-        patch_size=(args.afno_patch_size, args.afno_patch_size),
+        patch_size=[args.afno_patch_size, args.afno_patch_size],
         embed_dim=args.afno_embed_dim,
         depth=args.afno_depth,
         num_blocks=args.afno_num_blocks,
@@ -242,13 +244,14 @@ def train_afno(args, device, x_train, y_train, x_val, y_val) -> tuple:
     best_val = float("inf")
     best_state = None
     epochs_no_improve = 0
+    afno_history = []
 
     t0 = time.time()
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.time()
 
-        # --- Train ---
+        # Train
         model.train()
         train_loss_sum = 0.0
         for xb, yb in train_loader:
@@ -291,6 +294,13 @@ def train_afno(args, device, x_train, y_train, x_val, y_val) -> tuple:
             f"train={train_loss:.6f} | val={val_loss:.6f} | "
             f"lr={lr:.2e} | {elapsed_epoch:.1f}s"
         )
+        afno_history.append({
+            "epoch": epoch,
+            "train_loss": round(train_loss, 8),
+            "val_loss": round(val_loss, 8),
+            "lr": lr,
+            "time_s": round(elapsed_epoch, 2),
+        })
 
         if val_loss < best_val - 1e-6:
             best_val = val_loss
@@ -308,7 +318,26 @@ def train_afno(args, device, x_train, y_train, x_val, y_val) -> tuple:
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    return model, n_params, elapsed
+    return model, n_params, elapsed, afno_history
+
+
+# Results persistence
+
+def save_results(args, afno_history, fno_metrics, afno_metrics):
+    os.makedirs("results", exist_ok=True)
+    data = {
+        "timestamp": datetime.now().isoformat(),
+        "args": vars(args),
+        "afno_history": afno_history,
+        "final": {
+            "fno": fno_metrics,
+            "afno": afno_metrics,
+        },
+    }
+    path = "results/baseline_results.json"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"\nResults saved to {path}")
 
 
 # Main
@@ -338,7 +367,7 @@ def main():
     fno_model, fno_params, fno_time = train_fno(
         args, device, x_train, y_train, x_val, y_val
     )
-    afno_model, afno_params, afno_time = train_afno(
+    afno_model, afno_params, afno_time, afno_history = train_afno(
         args, device, x_train, y_train, x_val, y_val
     )
 
@@ -381,6 +410,23 @@ def main():
         tpe = total / args.epochs
         print(f"{name:<8} | {mse:>12.6f} | {params:>10,} | {tpe:>10.1f}s | {total:>8.1f}s")
     print("=" * 70)
+
+    save_results(
+        args,
+        afno_history,
+        fno_metrics={
+            "val_mse": fno_mse,
+            "params": fno_params,
+            "time_per_epoch_s": round(fno_time / args.epochs, 2),
+            "total_time_s": round(fno_time, 2),
+        },
+        afno_metrics={
+            "val_mse": afno_mse,
+            "params": afno_params,
+            "time_per_epoch_s": round(afno_time / args.epochs, 2),
+            "total_time_s": round(afno_time, 2),
+        },
+    )
 
 
 if __name__ == "__main__":
