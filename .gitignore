@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+checkpoints/
+*.pt
+cache/
+era5-5.625deg/
+.vscode/
+*.egg-info/
+dist/
+build/
