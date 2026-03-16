@@ -37,7 +37,7 @@ from data import (
     build_pairs, get_lat_weights, load_climatology, load_era5_data,
     VARIABLES, VAR_NAMES,
 )
-from evaluate import evaluate_normalized_mse, evaluate_wb2
+from evaluate import evaluate_normalized_mse, evaluate_wb2, plot_forecast_maps
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -366,6 +366,16 @@ def main():
                 for vn in VAR_NAMES
             )
             print(f"  {name.upper():5s} | {parts}")
+
+    # ── Forecast map visualizations ─────────────────────────────────────
+    print("\nGenerating forecast maps...")
+    for lead_h in args.lead_hours:
+        for name, mdl in active:
+            plot_forecast_maps(
+                model=mdl, data_val_raw=data_val_raw, lead_hours=lead_h,
+                mean=mean, std=std, lat=lat, lon=lon,
+                device=device, model_name=name, var_names=VAR_NAMES,
+            )
 
     # ── Print tables ──────────────────────────────────────────────────────
     print("\n" + "=" * 70)

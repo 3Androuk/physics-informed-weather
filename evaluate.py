@@ -5,6 +5,11 @@ Provides per-variable latitude-weighted RMSE and Anomaly Correlation
 Coefficient (ACC) for multi-variable forecasts, following WB2 conventions.
 """
 
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -181,3 +186,82 @@ def evaluate_wb2(
         result[f"rmse_{name}"] = round(rmse_per_var[i].item(), 4)
         result[f"acc_{name}"]  = round(acc_per_var[i].item(),  4)
     return result
+
+
+VAR_UNITS = {"z500": "m²/s²", "t850": "K"}
+
+
+@torch.no_grad()
+def plot_forecast_maps(
+    model: torch.nn.Module,
+    data_val_raw: np.ndarray,
+    lead_hours: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    device: torch.device,
+    model_name: str,
+    var_names: list = VAR_NAMES,
+    sample_idx: int = 0,
+    save_dir: str = "results",
+):
+    """Plot truth / prediction / error maps for a single sample.
+
+    Saves a PNG with one row per variable and 3 columns (Truth, Pred, Error).
+    """
+    model.eval()
+    x_np, y_np = build_pairs(data_val_raw, lead_hours)
+    x_sample = torch.from_numpy(np.ascontiguousarray(x_np[sample_idx : sample_idx + 1]))
+    y_sample = torch.from_numpy(np.ascontiguousarray(y_np[sample_idx : sample_idx + 1]))
+
+    x_norm = (x_sample - mean) / std
+    pred_norm = model(x_norm.to(device)).cpu()
+    pred_phys = denormalize(pred_norm, mean, std)
+
+    truth = y_sample[0].numpy()   # (C, H, W)
+    pred  = pred_phys[0].numpy()  # (C, H, W)
+    error = pred - truth           # (C, H, W)
+
+    n_vars = len(var_names)
+    fig, axes = plt.subplots(n_vars, 3, figsize=(18, 5 * n_vars))
+    if n_vars == 1:
+        axes = axes[np.newaxis, :]
+
+    for row, vn in enumerate(var_names):
+        unit = VAR_UNITS.get(vn, "")
+        t = truth[row]
+        p = pred[row]
+        e = error[row]
+
+        vmin = min(t.min(), p.min())
+        vmax = max(t.max(), p.max())
+        eabs = max(abs(e.min()), abs(e.max()))
+
+        # Truth
+        im0 = axes[row, 0].pcolormesh(lon, lat, t, vmin=vmin, vmax=vmax, cmap="viridis", shading="auto")
+        axes[row, 0].set_title(f"Truth — {vn.upper()} [{unit}]")
+        fig.colorbar(im0, ax=axes[row, 0], shrink=0.8)
+
+        # Prediction
+        im1 = axes[row, 1].pcolormesh(lon, lat, p, vmin=vmin, vmax=vmax, cmap="viridis", shading="auto")
+        axes[row, 1].set_title(f"Prediction — {vn.upper()} [{unit}]")
+        fig.colorbar(im1, ax=axes[row, 1], shrink=0.8)
+
+        # Error
+        im2 = axes[row, 2].pcolormesh(lon, lat, e, vmin=-eabs, vmax=eabs, cmap="RdBu_r", shading="auto")
+        axes[row, 2].set_title(f"Error — {vn.upper()} [{unit}]")
+        fig.colorbar(im2, ax=axes[row, 2], shrink=0.8)
+
+        for ax in axes[row]:
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+
+    fig.suptitle(f"{model_name.upper()} — {lead_hours}h forecast (sample {sample_idx})", fontsize=14, y=1.01)
+    fig.tight_layout()
+
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f"{model_name}_{lead_hours}h_forecast.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved forecast map: {path}")

@@ -1,21 +1,24 @@
 # Physics-Informed Weather Prediction Baselines
 
-FNO vs AFNO baseline comparison on ERA5 geopotential at 500 hPa (Z500), using
+FNO vs AFNO baseline comparison on ERA5 Z500 and T850, using
 [WeatherBench 2](https://sites.research.google/weatherbench/) data at 1.5-degree
 resolution (120 x 240 grid).
 
 ## Data
 
-ERA5 Z500 data is automatically downloaded from the
+ERA5 data (Z500 + T850) is automatically downloaded from the
 [WeatherBench 2](https://github.com/google-research/weatherbench2) Zarr store
 on Google Cloud Storage (public, no authentication required). Data is cached
 locally in `cache/` after the first run.
 
+- **Source**: `gs://weatherbench2/datasets/era5/1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr`
+- **Climatology**: `gs://weatherbench2/datasets/era5-hourly-climatology/1990-2019_6h_240x121_equiangular_with_poles_conservative.zarr`
+- **Browse**: https://console.cloud.google.com/storage/browser/weatherbench2/datasets
 - Resolution: 1.5 degrees (121 lat x 240 lon)
+- Variables: geopotential @ 500 hPa (Z500), temperature @ 850 hPa (T850)
 - Temporal resolution: 6-hourly
 - Training period: 1979-2015
 - Validation period: 2016-2017
-- Climatology: WB2 pre-computed 1990-2019 hourly climatology
 
 ## Setup
 
@@ -63,8 +66,8 @@ requirements.txt     # Python dependencies
 
 ## Evaluation Metrics
 
-- **Latitude-weighted RMSE** (m^2/s^2): Root mean squared error weighted by
-  cosine of latitude to account for grid cell area differences.
+- **Latitude-weighted RMSE**: Root mean squared error weighted by cosine of
+  latitude to account for grid cell area differences. Units: m^2/s^2 for Z500, K for T850.
 - **ACC** (Anomaly Correlation Coefficient): Correlation between forecast
   anomalies and truth anomalies relative to climatology. ACC > 0.6 indicates
   useful synoptic-scale skill.
