@@ -6,14 +6,44 @@ resolution (120 x 240 grid).
 
 ## Data
 
-ERA5 data (Z500 + T850) is automatically downloaded from the
-[WeatherBench 2](https://github.com/google-research/weatherbench2) Zarr store
-on Google Cloud Storage (public, no authentication required). Data is cached
-locally in `cache/` after the first run.
+ERA5 data (Z500 + T850) comes from the
+[WeatherBench 2](https://github.com/google-research/weatherbench2) project,
+hosted on Google Cloud Storage (public, no account required).
 
-- **Source**: `gs://weatherbench2/datasets/era5/1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr`
-- **Climatology**: `gs://weatherbench2/datasets/era5-hourly-climatology/1990-2019_6h_240x121_equiangular_with_poles_conservative.zarr`
-- **Browse**: https://console.cloud.google.com/storage/browser/weatherbench2/datasets
+**Automatic (recommended):** Just run the training script. It streams the
+required variables from GCS on first run and caches them locally in `cache/`
+(~6 GB for the full 1979–2015 training set). No manual steps needed.
+
+**Manual download:** The data is stored as Zarr archives (directories of
+chunked files, not a single downloadable file). To download manually, use
+the Python snippet below:
+
+```python
+import xarray as xr
+import numpy as np
+
+ERA5_ZARR = (
+    "gs://weatherbench2/datasets/era5/"
+    "1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr"
+)
+ds = xr.open_zarr(ERA5_ZARR, storage_options=dict(token="anon"))
+
+# Download Z500 and T850 for desired years
+z500 = ds["geopotential"].sel(level=500, time=slice("1979", "2015")).compute()
+t850 = ds["temperature"].sel(level=850, time=slice("1979", "2015")).compute()
+
+# Save locally
+z500.to_netcdf("z500_1979_2015.nc")
+t850.to_netcdf("t850_1979_2015.nc")
+```
+
+**Links:**
+- [WB2 data guide](https://weatherbench2.readthedocs.io/en/latest/data-guide.html) — full list of datasets and access instructions
+- [ERA5 dataset on GCS](https://console.cloud.google.com/storage/browser/weatherbench2/datasets/era5) — browse the reanalysis data
+- [Climatology on GCS](https://console.cloud.google.com/storage/browser/weatherbench2/datasets/era5-hourly-climatology) — used for ACC evaluation
+- [WB2 GitHub](https://github.com/google-research/weatherbench2) — benchmark code and documentation
+
+**Specs:**
 - Resolution: 1.5 degrees (121 lat x 240 lon)
 - Variables: geopotential @ 500 hPa (Z500), temperature @ 850 hPa (T850)
 - Temporal resolution: 6-hourly
