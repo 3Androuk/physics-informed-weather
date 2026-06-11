@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+datasets/raw/
+datasets/patches/
+checkpoints/
+results/
+*.npy
+*.npz
+*.pt
+*.ckpt

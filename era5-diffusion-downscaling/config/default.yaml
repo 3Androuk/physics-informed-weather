@@ -1,0 +1,93 @@
+# Diffusion-based ERA5 Z500 downscaling — Phase 1 (physics-agnostic).
+# Reimplementation of Shu, Li & Barati Farimani (2023), J. Comput. Phys. 478, 111972.
+
+seed: 42
+
+paths:
+  raw_dir: datasets/raw          # streamed ERA5 Z500 fields (.npy) + coords
+  patch_dir: datasets/patches    # cropped HF patches + normalization stats
+  ckpt_dir: checkpoints
+  results_dir: results
+  log_dir: results/tb            # tensorboard logs
+
+data:
+  # WeatherBench 2 public GCS store, 0.25deg (721 x 1440), no auth required.
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
+  gcs_token: anon
+  variable: geopotential         # zarr name; Z500 = geopotential @ 500 hPa
+  level: 500
+  # Time-based split (the diffusion model only ever sees HF train patches).
+  train_years: [2007, 2015]
+  test_years: [2016, 2017]
+  time_stride: 4                 # take every Nth 6-hourly step (decorrelate samples)
+
+patches:
+  size: 128                      # high-fidelity target patch (scale to 256 later)
+  per_field: 8                   # random crops per global field
+  # Latitude band to crop from (avoid the poles where lat-lon distortion is worst).
+  lat_range: [-60.0, 60.0]
+  scalable_note: "set size: 256 once the pipeline is verified end-to-end"
+
+normalize:
+  method: zscore                 # per-dataset mean/std computed on train patches
+
+diffusion:
+  timesteps: 1000                # T
+  beta_schedule: linear          # Ho et al. 2020
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+
+unet:
+  in_channels: 1
+  out_channels: 1
+  base_channels: 64
+  channel_mults: [1, 2, 4, 8]    # 128 -> 64 -> 32 -> 16 -> 8 (attn at bottleneck)
+  num_res_blocks: 2
+  time_emb_dim: 256
+  attn_resolutions: [16]         # self-attention at coarse (bottleneck) resolution
+  dropout: 0.1
+  groupnorm_groups: 32
+
+train:
+  batch_size: 16            # RTX 4070 8GB: ~6.5GB at 128px. Drop to 8 if OOM; 32 needs ~12GB.
+  epochs: 200
+  lr: 2.0e-4
+  weight_decay: 0.0
+  grad_clip: 1.0
+  amp: true
+  ema_decay: 0.999
+  num_workers: 4
+  log_every: 50
+  ckpt_every_epochs: 10
+  sample_every_epochs: 10        # unconditional samples for sanity
+
+# Direct-mapping baseline: trained ONLY on 4x pairs (deliberately brittle).
+directmap:
+  train_ratio: 4
+  batch_size: 16            # same UNet footprint as the diffusion model
+  epochs: 200
+  lr: 2.0e-4
+  grad_clip: 1.0
+  amp: true
+
+# Guided DDIM sampling (Algorithm 2, physics term dropped; sigma = 0).
+sample:
+  ddim_eta: 0.0                  # sigma = 0 (deterministic), as in the paper
+  guidance_strength: 0.0         # w = 0 in Phase 1 (no physics residual term)
+  interp: nearest                # coarse -> target grid before noise mixing
+  # One trained diffusion model serves every ratio (the core robustness claim).
+  # Each entry: outer-loop count K and the per-iteration start timestep t (== #DDIM steps).
+  reconstructions:
+    - ratio: 4                   # in-distribution
+      K: 3
+      t_steps: [160, 114, 80]
+      smooth_sigma: 0.0
+    - ratio: 8                   # out-of-distribution (same model, no retraining)
+      K: 1
+      t_steps: [320]
+      smooth_sigma: 5.0          # Gaussian pre-smoothing to reduce nearest-upsample aliasing
+
+eval:
+  n_test_patches: 256            # patches drawn from the test split for metrics
+  spectrum_bins: null            # null -> use radial integer wavenumber bins
+  hist_bins: 100
