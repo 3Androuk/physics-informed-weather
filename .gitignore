@@ -1,12 +1,36 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
 *.pyo
-checkpoints/
-*.pt
-cache/
-era5-5.625deg/
-.vscode/
 *.egg-info/
 dist/
 build/
+
+# Environments / editors
+.venv/
+.vscode/
+.idea/
+
+# Model checkpoints & weights
+checkpoints/
+*.pt
+*.ckpt
+
+# Cached / downloaded ERA5 data
+cache/
+datasets/raw/
+datasets/patches/
+era5-5.625deg/
+*.npy
+*.npz
+
+# Generated inference outputs (FourCastNet zarr, plots, TB logs)
+outputs/
+plots/
+*.zarr/
+runs/
+results/tb/
+
+# Note: fno-afno-baselines/results/ (forecast PNGs + baseline_results.json) is
+# intentionally tracked. era5-diffusion-downscaling/ has its own .gitignore that
+# ignores its generated results/.

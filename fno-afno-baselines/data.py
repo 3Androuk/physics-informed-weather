@@ -30,10 +30,12 @@ HOURS_PER_STEP = 6  # WB2 temporal resolution
 # Variables to load: (zarr_variable_name, pressure_level or None for surface)
 # None level means surface variable (no level dimension)
 VARIABLES: List[Tuple[str, int]] = [
-    ("geopotential", 500),   # Z500
-    ("temperature", 850),    # T850
+    ("geopotential", 500),            # Z500
+    ("temperature", 850),             # T850
+    ("u_component_of_wind", 850),     # U850
+    ("v_component_of_wind", 850),     # V850
 ]
-VAR_NAMES = ["z500", "t850"]  # human-readable names matching VARIABLES
+VAR_NAMES = ["z500", "t850", "u850", "v850"]  # human-readable names matching VARIABLES
 
 
 def load_era5_data(

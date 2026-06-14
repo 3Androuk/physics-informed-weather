@@ -1,10 +1,11 @@
 """
-Baseline comparison: FNO (neuralop) vs AFNO (physicsnemo) on ERA5 Z500 + T850.
+Baseline comparison: FNO (neuralop) vs AFNO (physicsnemo) on ERA5 Z500, T850, U850, V850.
 
 Uses WeatherBench 2 ERA5 data at 1.5deg resolution (120x240 grid after crop),
 downloaded automatically from Google Cloud Storage (public, no auth required).
-Trains on 2 channels (geopotential@500hPa, temperature@850hPa) and evaluates
-with latitude-weighted RMSE and ACC per variable at multiple lead times.
+Trains on 4 channels (geopotential@500hPa, temperature@850hPa, u-wind@850hPa,
+v-wind@850hPa) and evaluates with latitude-weighted RMSE and ACC per variable
+at multiple lead times.
 
 Usage:
     python train_baselines.py [--epochs 40] [--lead-hours 24 72 120]

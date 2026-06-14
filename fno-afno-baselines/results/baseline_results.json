@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-04-13T18:56:24.546104",
+  "args": {
+    "train_years": [
+      2014,
+      2015
+    ],
+    "val_years": [
+      2016,
+      2016
+    ],
+    "cache_dir": "cache",
+    "train_lead_hours": 24,
+    "lead_hours": [
+      24
+    ],
+    "batch_size": 32,
+    "epochs": 1,
+    "lr": 0.0003,
+    "weight_decay": 0.0001,
+    "grad_clip": 1.0,
+    "patience": 8,
+    "seed": 42,
+    "num_workers": 4,
+    "no_amp": false,
+    "models": [
+      "afno"
+    ],
+    "fno_modes": 12,
+    "fno_width": 32,
+    "fno_layers": 4,
+    "afno_patch_size": 8,
+    "afno_embed_dim": 256,
+    "afno_depth": 4,
+    "afno_num_blocks": 8
+  },
+  "afno_history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.45531789,
+      "val_loss": 0.28954259,
+      "lr": 0.0003,
+      "time_s": 13.21
+    }
+  ],
+  "final": {
+    "afno": {
+      "val_mse": 0.2895417030833809,
+      "params": 2488064,
+      "time_per_epoch_s": 13.24,
+      "total_time_s": 13.24
+    }
+  },
+  "wb2_evaluation": {
+    "afno_24h": {
+      "lead_hours": 24,
+      "normalized_mse": 0.289542,
+      "rmse_z500": 704.2386,
+      "acc_z500": 0.6262,
+      "rmse_t850": 3.3017,
+      "acc_t850": 0.5226,
+      "rmse_u850": 4.7328,
+      "acc_u850": 0.5645,
+      "rmse_v850": 4.8122,
+      "acc_v850": 0.4784
+    }
+  }
+}
