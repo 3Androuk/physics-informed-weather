@@ -191,7 +191,8 @@ def main():
             if not np.isfinite(arr).all():
                 raise ValueError(f"{split} {year} contains NaN/Inf.")
             tmp = ypath.with_suffix(".npy.tmp")
-            np.save(tmp, arr)
+            with open(tmp, "wb") as fh:  # file object: np.save won't append .npy
+                np.save(fh, arr)
             tmp.replace(ypath)
             print(f"[done] {split} {year}: {arr.shape} -> {ypath.name}", flush=True)
             if not coords_path.exists():

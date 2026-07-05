@@ -38,7 +38,8 @@ def _save_npy_atomic(path: Path, arr: np.ndarray) -> None:
     """Write via a .tmp then rename, so an interrupted save can't leave a
     half-written .npy that a later run would mistake for complete."""
     tmp = path.with_suffix(".npy.tmp")
-    np.save(tmp, arr)
+    with open(tmp, "wb") as fh:  # file object: np.save won't append .npy
+        np.save(fh, arr)
     tmp.replace(path)
 
 
