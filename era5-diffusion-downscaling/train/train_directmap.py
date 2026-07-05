@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
-from utils import ensure_dir, get_device, load_config, set_seed  # noqa: E402
+from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
 
 
 def main():
@@ -44,6 +44,11 @@ def main():
         persistent_workers=cfg["train"]["num_workers"] > 0,
     )
     print(f"Direct-map baseline | train ratio {ratio}x | patches {len(ds)}")
+
+    wb_run, _ = init_wandb(cfg, job_type="train_directmap",
+                           extra_config={"train_ratio": ratio, "n_train_patches": len(ds)})
+    if wb_run is not None:
+        print(f"wandb: logging to {wb_run.url}")
 
     model = build_unet(cfg, use_time=False).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=dc["lr"])
@@ -72,13 +77,18 @@ def main():
             running += loss.item()
             step += 1
             if step % cfg["train"]["log_every"] == 0:
-                print(f"epoch {epoch:03d} step {step:07d} | mse {running / cfg['train']['log_every']:.5f}")
+                avg = running / cfg["train"]["log_every"]
+                print(f"epoch {epoch:03d} step {step:07d} | mse {avg:.5f}")
                 running = 0.0
+                if wb_run is not None:
+                    wb_run.log({"train/mse": avg, "epoch": epoch}, step=step)
 
     torch.save({
         "model": model.state_dict(), "config": cfg, "train_ratio": ratio,
         "norm_mean": normalizer.mean, "norm_std": normalizer.std,
     }, ckpt_dir / "directmap.pt")
+    if wb_run is not None:
+        wb_run.finish()
     print(f"Done. Checkpoint -> {ckpt_dir / 'directmap.pt'}")
 
 

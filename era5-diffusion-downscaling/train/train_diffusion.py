@@ -20,7 +20,7 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import ensure_dir, get_device, load_config, set_seed  # noqa: E402
+from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
 
 
 def main():
@@ -62,6 +62,11 @@ def main():
     except Exception:
         print("(tensorboard unavailable — skipping logging)")
 
+    wb_run, wandb = init_wandb(cfg, job_type="train_diffusion",
+                               extra_config={"unet_params": n_params, "n_train_patches": len(ds)})
+    if wb_run is not None:
+        print(f"wandb: logging to {wb_run.url}")
+
     step = 0
     for epoch in range(1, tc["epochs"] + 1):
         model.train()
@@ -87,13 +92,19 @@ def main():
                 print(f"epoch {epoch:03d} step {step:07d} | loss {avg:.5f}")
                 if writer:
                     writer.add_scalar("train/loss", avg, step)
+                if wb_run is not None:
+                    wb_run.log({"train/loss": avg, "epoch": epoch}, step=step)
 
         if epoch % tc["sample_every_epochs"] == 0:
-            _save_samples(diffusion, ema.shadow, normalizer, device,
-                          results_dir / f"uncond_epoch{epoch:03d}.png", cfg)
+            sample_path = results_dir / f"uncond_epoch{epoch:03d}.png"
+            _save_samples(diffusion, ema.shadow, normalizer, device, sample_path, cfg)
+            if wb_run is not None:
+                wb_run.log({"samples": wandb.Image(str(sample_path))}, step=step)
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
             _save_ckpt(ckpt_dir / "diffusion.pt", model, ema, cfg, normalizer, epoch, step)
 
+    if wb_run is not None:
+        wb_run.finish()
     print(f"Done. Checkpoint -> {ckpt_dir / 'diffusion.pt'}")
 
 

@@ -40,3 +40,25 @@ def ensure_dir(path: str | os.PathLike) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def init_wandb(cfg: dict, job_type: str, extra_config: dict | None = None):
+    """Start a wandb run when cfg['wandb'].enabled is true.
+
+    Opt-in: returns (None, None) when disabled so callers can guard with
+    `if run is not None`. Returns (run, wandb_module) when enabled — the module
+    is handed back so callers can build wandb.Image() etc. without re-importing.
+    """
+    wcfg = cfg.get("wandb", {})
+    if not wcfg.get("enabled"):
+        return None, None
+    import wandb
+    config = {**cfg, **(extra_config or {})}
+    run = wandb.init(
+        project=wcfg.get("project", "era5-diffusion-downscaling"),
+        entity=wcfg.get("entity"),
+        name=wcfg.get("name"),
+        job_type=job_type,
+        config=config,
+    )
+    return run, wandb

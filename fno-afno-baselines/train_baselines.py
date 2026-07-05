@@ -72,6 +72,11 @@ def parse_args():
     p.add_argument("--afno-embed-dim", type=int, default=256)
     p.add_argument("--afno-depth", type=int, default=4)
     p.add_argument("--afno-num-blocks", type=int, default=8)
+    # Weights & Biases (opt-in)
+    p.add_argument("--wandb", action="store_true", help="Log this run to Weights & Biases.")
+    p.add_argument("--wandb-project", type=str, default="fno-afno-baselines")
+    p.add_argument("--wandb-entity", type=str, default=None, help="wandb team/user (default: your login).")
+    p.add_argument("--wandb-name", type=str, default=None, help="Run name (default: wandb auto-name).")
     return p.parse_args()
 
 
@@ -158,7 +163,7 @@ def train_fno(args, device, x_train, y_train, x_val, y_val):
 
 # ── AFNO Training ─────────────────────────────────────────────────────────────
 
-def train_afno(args, device, x_train, y_train, x_val, y_val):
+def train_afno(args, device, x_train, y_train, x_val, y_val, wandb_run=None):
     """Train AFNO with a standard PyTorch loop."""
     print("\n" + "=" * 60)
     print("  TRAINING AFNO (physicsnemo)")
@@ -242,6 +247,12 @@ def train_afno(args, device, x_train, y_train, x_val, y_val):
             "lr": lr,
             "time_s": round(ep_time, 2),
         })
+        if wandb_run is not None:
+            wandb_run.log(
+                {"afno/train_loss": train_loss, "afno/val_loss": val_loss,
+                 "afno/lr": lr, "afno/epoch_time_s": ep_time},
+                step=epoch,
+            )
 
         if val_loss < best_val - 1e-6:
             best_val = val_loss
@@ -272,6 +283,18 @@ def main():
 
     device = torch.device("cuda")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+    # ── Weights & Biases (opt-in via --wandb) ─────────────────────────────
+    wandb_run = None
+    if args.wandb:
+        import wandb
+        wandb_run = wandb.init(
+            project=args.wandb_project, entity=args.wandb_entity,
+            name=args.wandb_name,
+            config={**vars(args), "gpu": torch.cuda.get_device_name(0)},
+        )
+        print(f"wandb: logging to {wandb_run.url}")
+
     print(
         f"Config: train={args.train_years}, val={args.val_years}, "
         f"train_lead={args.train_lead_hours}h, eval_leads={args.lead_hours}h, "
@@ -325,7 +348,7 @@ def main():
         )
     if "afno" in models:
         afno_model, afno_params, afno_time, afno_history = train_afno(
-            args, device, x_train_n, y_train_n, x_val_n, y_val_n
+            args, device, x_train_n, y_train_n, x_val_n, y_val_n, wandb_run=wandb_run
         )
 
     # ── Normalized MSE ────────────────────────────────────────────────────
@@ -334,6 +357,12 @@ def main():
         fno_mse = evaluate_normalized_mse(fno_model, x_val_n, y_val_n, device)
     if afno_model is not None:
         afno_mse = evaluate_normalized_mse(afno_model, x_val_n, y_val_n, device)
+
+    if wandb_run is not None:
+        for name, mse, params in [("fno", fno_mse, fno_params), ("afno", afno_mse, afno_params)]:
+            if mse is not None:
+                wandb_run.summary[f"{name}/val_mse"] = mse
+                wandb_run.summary[f"{name}/params"] = params
 
     # ── Save checkpoints ──────────────────────────────────────────────────
     ckpt_dir = Path("checkpoints")
@@ -362,6 +391,13 @@ def main():
                 variables=VARIABLES, var_names=VAR_NAMES,
             )
             wb2_eval[f"{name}_{lead_h}h"] = m
+            if wandb_run is not None:
+                wandb_run.summary.update({
+                    f"{name}/{lead_h}h/rmse_{vn}": m[f"rmse_{vn}"] for vn in VAR_NAMES
+                })
+                wandb_run.summary.update({
+                    f"{name}/{lead_h}h/acc_{vn}": m[f"acc_{vn}"] for vn in VAR_NAMES
+                })
             parts = "  |  ".join(
                 f"{vn.upper()}: RMSE={m[f'rmse_{vn}']:>8.2f}  ACC={m[f'acc_{vn}']:.4f}"
                 for vn in VAR_NAMES
@@ -432,6 +468,10 @@ def main():
     with open(path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {path}")
+
+    if wandb_run is not None:
+        wandb_run.save(path)
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

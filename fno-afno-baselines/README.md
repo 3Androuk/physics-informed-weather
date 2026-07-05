@@ -85,7 +85,23 @@ python train_baselines.py \
     --batch-size 32
 ```
 
-## Project Structure
+### Experiment tracking (Weights & Biases)
+
+wandb is **opt-in**. Log in once per machine, then add `--wandb` to any run:
+
+```bash
+wandb login                       # paste your API key (once per machine)
+
+python train_baselines.py --wandb                     # -> project "fno-afno-baselines"
+python train_baselines.py --wandb --wandb-name fno-only --models fno
+```
+
+Logs AFNO per-epoch train/val loss and LR; records both models' final val MSE,
+parameter counts, and per-lead-time WB2 RMSE/ACC in the run summary. Without
+`--wandb` nothing is sent. Flags: `--wandb-project`, `--wandb-entity`,
+`--wandb-name`. To log without an account, run `wandb offline` first.
+
+## Subproject Structure
 
 ```
 data.py              # WB2 data loading, caching, normalization

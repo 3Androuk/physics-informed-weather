@@ -91,3 +91,11 @@ eval:
   n_test_patches: 256            # patches drawn from the test split for metrics
   spectrum_bins: null            # null -> use radial integer wavenumber bins
   hist_bins: 100
+
+# Weights & Biases (opt-in). Set enabled: true, or run `wandb login` first.
+# TensorBoard logging (paths.log_dir) is independent and always on.
+wandb:
+  enabled: false
+  project: era5-diffusion-downscaling
+  entity: null                   # null -> your default wandb entity
+  name: null                     # null -> wandb auto-generates a run name

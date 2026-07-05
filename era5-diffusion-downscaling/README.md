@@ -61,6 +61,24 @@ python -m train.train_directmap   --config config/default.yaml
 python -m eval.make_tables_figures --config config/default.yaml
 ```
 
+### Experiment tracking (Weights & Biases)
+
+wandb is **opt-in** and independent of the always-on TensorBoard logs
+(`results/tb`). Log in once, then flip `wandb.enabled: true` in
+`config/default.yaml` (or a copy):
+
+```bash
+wandb login                       # paste your API key (once per machine)
+# set wandb.enabled: true in config/default.yaml
+python -m train.train_diffusion --config config/default.yaml
+python -m train.train_directmap --config config/default.yaml
+```
+
+The diffusion run logs training loss and the periodic unconditional sample
+grids; the direct-map run logs its MSE curve. Both go to the
+`era5-diffusion-downscaling` project. Set `wandb.project/entity/name` in the
+config to customize. To log without an account, run `wandb offline` first.
+
 ## Evaluation
 
 - **L2 norm** (RMSE) — pointwise error vs ground truth.

@@ -15,3 +15,4 @@ dask>=2024.0
 
 # Optional logging
 tensorboard>=2.16
+wandb>=0.17          # opt-in; enable via config wandb.enabled: true
