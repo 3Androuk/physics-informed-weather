@@ -4,14 +4,19 @@ Downloads geopotential @ 500 hPa at 0.25 deg (721 x 1440), cropped to a
 mid-latitude band, for the configured train/test year ranges, and caches each
 split as a float32 .npy of shape (T, H, W). No credentials required.
 
-Robustness (to survive flaky links to GCS):
-  * Fetches ONE YEAR AT A TIME and writes each to datasets/raw/_years/ as it
-    completes, so a stalled connection costs at most one year — rerun and it
-    skips every year already on disk (resume).
-  * Per-request read timeout (--timeout) so a stalled read raises instead of
-    hanging forever; each year is retried up to --max-retries times with backoff.
-  * Per-year arrays are merged into train.npy / test.npy at the end via a
-    memmap, so the merge never holds more than one year in RAM.
+This store is 0.25 deg (1440x721) — ~36x more data per field than the 1.5 deg
+store the baselines use — so the download is large. Built to survive a slow /
+flaky link to GCS:
+  * ONE YEAR AT A TIME, each written to datasets/raw/_years/ as it finishes —
+    a rerun skips every year already on disk (resume).
+  * Each year is read in SMALL TIME-BATCHES so every HTTP request is small and
+    completes well within --timeout; a stalled batch is retried (with a fresh
+    connection) up to --max-retries, costing one batch rather than a whole year.
+  * Small dask chunks (--chunk-time) keep individual reads tiny — an oversized
+    chunk that can't be read before the timeout fires is the usual cause of
+    "times out on the first year".
+  * Per-year arrays are merged into train.npy / test.npy via a memmap, so the
+    merge never holds more than one year in RAM.
 
 Note: striding (data.time_stride) is applied within each year, so the exact
 timesteps chosen differ negligibly from striding the whole range at once; this
@@ -19,7 +24,7 @@ does not affect the downstream random-crop patches.
 
 Run:
     python -m data.download_era5 --config config/default.yaml
-    python -m data.download_era5 --config config/default.yaml --timeout 90 --max-retries 8
+    python -m data.download_era5 --config config/default.yaml --timeout 120 --chunk-time 8 --batch 48
 """
 
 import argparse
@@ -33,11 +38,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils import ensure_dir, load_config  # noqa: E402
 
 
-def _open_da(dcfg, lat_range, timeout):
+def _open_da(dcfg, lat_range, timeout, chunk_time):
     """Open the WB2 zarr and return the Z500 DataArray cropped to lat_range.
 
-    A fresh handle (and thus a fresh network session) is opened on every call, so
-    a retry after a stall is never stuck reusing a broken connection.
+    A fresh handle (fresh network session) is opened on every call, so a retry
+    after a stall never reuses a broken connection. Small time-chunks keep each
+    underlying HTTP read small.
     """
     import xarray as xr  # local import so non-download code has no hard dep
 
@@ -45,12 +51,13 @@ def _open_da(dcfg, lat_range, timeout):
     if timeout:
         storage["requests_timeout"] = timeout
     try:
-        ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": 50}, storage_options=storage)
+        ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": chunk_time},
+                          storage_options=storage)
     except TypeError:
-        # gcsfs build without requests_timeout: fall back (no per-request timeout).
         storage.pop("requests_timeout", None)
         print("  (warning: gcsfs ignored requests_timeout — stalls may not time out)")
-        ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": 50}, storage_options=storage)
+        ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": chunk_time},
+                          storage_options=storage)
 
     da = ds[dcfg["variable"]].sel(level=dcfg["level"])
     da = da.transpose("time", "latitude", "longitude")
@@ -60,40 +67,60 @@ def _open_da(dcfg, lat_range, timeout):
     return da
 
 
-def _download_year(dcfg, lat_range, year, stride, timeout):
-    """Fetch a single year -> (arr (T, H, W) float32, lat, lon)."""
-    da = _open_da(dcfg, lat_range, timeout)
+def _year_sub(da, year, stride):
+    """Strided time-slice of a single calendar year."""
     sub = da.sel(time=slice(f"{year}-01-01", f"{year}-12-31"))
     if stride and stride > 1:
         sub = sub.isel(time=slice(None, None, stride))
-    n = int(sub.sizes["time"])
-    print(f"  computing {n} fields for {year} ...", flush=True)
-    arr = sub.compute().values.astype(np.float32)
-    return arr, da["latitude"].values, da["longitude"].values
+    return sub
 
 
-def _download_year_retry(dcfg, lat_range, year, stride, timeout, max_retries):
-    """_download_year with bounded retries + linear backoff on any failure."""
-    for attempt in range(1, max_retries + 1):
-        try:
-            return _download_year(dcfg, lat_range, year, stride, timeout)
-        except Exception as e:  # noqa: BLE001 - surface any GCS/dask error and retry
-            if attempt == max_retries:
-                raise RuntimeError(
-                    f"Year {year} failed after {max_retries} attempts: "
-                    f"{type(e).__name__}: {e}"
-                ) from e
-            wait = min(60, 5 * attempt)
-            print(f"  [retry {attempt}/{max_retries}] {year} failed "
-                  f"({type(e).__name__}: {e}); retrying in {wait}s ...", flush=True)
-            time.sleep(wait)
+def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time, max_retries):
+    """Fetch one year in small batches -> (arr (T, H, W) float32, lat, lon).
+
+    Each batch of `batch` (strided) fields is read independently and retried on
+    failure with a fresh connection, so a stall costs at most one batch.
+    """
+    da = _open_da(dcfg, lat_range, timeout, chunk_time)
+    sub = _year_sub(da, year, stride)
+    T = int(sub.sizes["time"])
+    H, W = int(sub.sizes["latitude"]), int(sub.sizes["longitude"])
+    lat, lon = da["latitude"].values, da["longitude"].values
+
+    out = np.empty((T, H, W), dtype=np.float32)
+    n_batches = (T + batch - 1) // batch
+    print(f"  {year}: {T} fields in {n_batches} batches of {batch} ...", flush=True)
+
+    start = 0
+    while start < T:
+        stop = min(start + batch, T)
+        for attempt in range(1, max_retries + 1):
+            try:
+                out[start:stop] = sub.isel(time=slice(start, stop)).values.astype(np.float32)
+                break
+            except Exception as e:  # noqa: BLE001 - retry any GCS/dask read error
+                if attempt == max_retries:
+                    raise RuntimeError(
+                        f"{year} fields [{start}:{stop}] failed after {max_retries} "
+                        f"attempts: {type(e).__name__}: {e}"
+                    ) from e
+                wait = min(30, 3 * attempt)
+                print(f"    [retry {attempt}/{max_retries}] {year} [{start}:{stop}] "
+                      f"{type(e).__name__}; reconnecting in {wait}s ...", flush=True)
+                time.sleep(wait)
+                da = _open_da(dcfg, lat_range, timeout, chunk_time)  # fresh session
+                sub = _year_sub(da, year, stride)
+        start = stop
+        print(f"    {year}: {stop}/{T}", flush=True)
+
+    return out, lat, lon
 
 
 def _merge(cache_dir, split, years, out_path):
-    """Concatenate the per-year caches into out_path (.npy) via a memmap.
+    """Concatenate per-year caches into out_path (.npy) via a memmap (low RAM).
 
-    Never holds more than one year in RAM; writes to a .tmp then renames so an
-    interrupted merge can't leave a half-written train.npy.
+    Writes to a .tmp then renames so an interrupted merge can't leave a
+    half-written train.npy.
     """
     from numpy.lib.format import open_memmap
 
@@ -116,26 +143,18 @@ def _merge(cache_dir, split, years, out_path):
     return (total, h, w)
 
 
-def _save_coords(dcfg, lat_range, timeout, max_retries, coords_path):
-    """Save lat/lon once (with retries) — used only if no year populated it."""
-    for attempt in range(1, max_retries + 1):
-        try:
-            da = _open_da(dcfg, lat_range, timeout)
-            np.savez(coords_path, lat=da["latitude"].values, lon=da["longitude"].values)
-            return
-        except Exception:  # noqa: BLE001
-            if attempt == max_retries:
-                raise
-            time.sleep(min(60, 5 * attempt))
-
-
 def main():
     ap = argparse.ArgumentParser(description="Download ERA5 Z500 from WB2 GCS (resumable).")
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--timeout", type=int, default=120,
                     help="per-request GCS read timeout in seconds (0 disables).")
+    ap.add_argument("--chunk-time", type=int, default=8,
+                    help="dask time-chunk size = size of each HTTP read. Smaller = "
+                         "more resilient on a slow link.")
+    ap.add_argument("--batch", type=int, default=48,
+                    help="fields fetched (and retried) per batch within a year.")
     ap.add_argument("--max-retries", type=int, default=6,
-                    help="retries per year before giving up.")
+                    help="retries per batch before giving up.")
     ap.add_argument("--keep-cache", action="store_true",
                     help="keep the per-year datasets/raw/_years/ files after merging.")
     args = ap.parse_args()
@@ -149,8 +168,9 @@ def main():
     cache_dir = ensure_dir(Path(raw_dir) / "_years")
     coords_path = Path(raw_dir) / "coords.npz"
 
-    print(f"Opening {dcfg['era5_zarr']} (per-year, timeout={args.timeout}s, "
-          f"retries={args.max_retries})", flush=True)
+    print(f"Opening {dcfg['era5_zarr']}\n  per-year | timeout={args.timeout}s | "
+          f"chunk_time={args.chunk_time} | batch={args.batch} | retries={args.max_retries}",
+          flush=True)
 
     splits = {
         "train": list(range(dcfg["train_years"][0], dcfg["train_years"][1] + 1)),
@@ -164,8 +184,9 @@ def main():
             if ypath.exists():
                 print(f"[skip] {split} {year} already cached", flush=True)
                 continue
-            arr, lat, lon = _download_year_retry(
-                dcfg, lat_range, year, stride, args.timeout, args.max_retries
+            arr, lat, lon = _download_year(
+                dcfg, lat_range, year, stride, args.batch,
+                args.timeout, args.chunk_time, args.max_retries,
             )
             if not np.isfinite(arr).all():
                 raise ValueError(f"{split} {year} contains NaN/Inf.")
@@ -178,7 +199,8 @@ def main():
             del arr
 
     if not coords_path.exists():  # e.g. resumed run where every year was cached
-        _save_coords(dcfg, lat_range, args.timeout, args.max_retries, coords_path)
+        da = _open_da(dcfg, lat_range, args.timeout, args.chunk_time)
+        np.savez(coords_path, lat=da["latitude"].values, lon=da["longitude"].values)
 
     # ── Merge per-year caches into train.npy / test.npy ───────────────────
     merged = {}
