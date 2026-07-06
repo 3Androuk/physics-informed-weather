@@ -26,8 +26,12 @@ from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # n
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/default.yaml")
+    ap.add_argument("--wandb", action="store_true",
+                    help="Enable wandb logging (overrides config wandb.enabled).")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.wandb:
+        cfg.setdefault("wandb", {})["enabled"] = True
     set_seed(cfg["seed"])
     device = get_device()
 
