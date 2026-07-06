@@ -49,5 +49,7 @@ class PatchDataset(Dataset):
         return len(self.patches)
 
     def __getitem__(self, i: int) -> torch.Tensor:
-        x = torch.from_numpy(np.ascontiguousarray(self.patches[i])).float()
+        # Copy out of the read-only mmap: from_numpy on a non-writable view is
+        # undefined behavior if the tensor is ever written to.
+        x = torch.from_numpy(np.array(self.patches[i], dtype=np.float32))
         return self.normalizer.encode(x)

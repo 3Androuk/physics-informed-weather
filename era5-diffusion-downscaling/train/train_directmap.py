@@ -61,9 +61,12 @@ def main():
     loss_fn = torch.nn.MSELoss()
 
     step = 0
+    # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
+    # a multiple of log_every, and resetting per epoch both drops the tail
+    # batches and makes the next log divide a partial sum by the full window.
+    running, running_n = 0.0, 0
     for epoch in range(1, dc["epochs"] + 1):
         model.train()
-        running = 0.0
         for y in loader:  # y: normalized HF target
             y = y.to(device, non_blocking=True)
             # Low-fidelity input: degrade in normalized space (equivalent up to
@@ -79,11 +82,12 @@ def main():
             scaler.step(opt)
             scaler.update()
             running += loss.item()
+            running_n += 1
             step += 1
             if step % cfg["train"]["log_every"] == 0:
-                avg = running / cfg["train"]["log_every"]
+                avg = running / running_n
                 print(f"epoch {epoch:03d} step {step:07d} | mse {avg:.5f}")
-                running = 0.0
+                running, running_n = 0.0, 0
                 if wb_run is not None:
                     wb_run.log({"train/mse": avg, "epoch": epoch}, step=step)
 
