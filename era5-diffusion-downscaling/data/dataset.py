@@ -5,6 +5,8 @@ Low-fidelity inputs are generated on the fly (see data.degrade) and are never
 part of the diffusion training set.
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 

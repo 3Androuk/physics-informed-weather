@@ -8,6 +8,8 @@ introduced by nearest upsampling — the paper applies this to out-of-distributi
 (8x) inputs.
 """
 
+from __future__ import annotations
+
 import math
 
 import torch

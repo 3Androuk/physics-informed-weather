@@ -6,6 +6,8 @@ architecture serves the direct-mapping baseline with ``use_time=False`` (no
 timestep conditioning, plain f: X -> Y regression).
 """
 
+from __future__ import annotations
+
 import math
 
 import torch
