@@ -28,6 +28,8 @@ def main():
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
+    ap.add_argument("--resume", action="store_true",
+                    help="Resume from paths.ckpt_dir/diffusion.pt if it exists.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -59,6 +61,23 @@ def main():
     use_amp = tc["amp"] and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    start_epoch, step = 1, 0
+    ckpt_path = ckpt_dir / "diffusion.pt"
+    if args.resume and ckpt_path.exists():
+        ck = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        ema.load_state_dict(ck["ema"])
+        if "opt" in ck:  # checkpoints from before resume support lack these
+            opt.load_state_dict(ck["opt"])
+            scaler.load_state_dict(ck["scaler"])
+        else:
+            print("(old checkpoint: no optimizer/scaler state — resuming weights only)")
+        start_epoch = ck["epoch"] + 1
+        step = ck["step"]
+        print(f"Resumed from {ckpt_path} at epoch {ck['epoch']} (step {step})")
+    elif args.resume:
+        print(f"(no checkpoint at {ckpt_path} — starting fresh)")
+
     writer = None
     try:
         from torch.utils.tensorboard import SummaryWriter
@@ -71,12 +90,11 @@ def main():
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
 
-    step = 0
     # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
     # a multiple of log_every, and resetting per epoch both drops the tail
     # batches and makes the next log divide a partial sum by the full window.
     running, running_n = 0.0, 0
-    for epoch in range(1, tc["epochs"] + 1):
+    for epoch in range(start_epoch, tc["epochs"] + 1):
         model.train()
         for x0 in loader:
             x0 = x0.to(device, non_blocking=True)
@@ -109,14 +127,14 @@ def main():
             if wb_run is not None:
                 wb_run.log({"samples": wandb.Image(str(sample_path))}, step=step)
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
-            _save_ckpt(ckpt_dir / "diffusion.pt", model, ema, cfg, normalizer, epoch, step)
+            _save_ckpt(ckpt_path, model, ema, opt, scaler, cfg, normalizer, epoch, step)
 
     if wb_run is not None:
         wb_run.finish()
     print(f"Done. Checkpoint -> {ckpt_dir / 'diffusion.pt'}")
 
 
-def _save_ckpt(path, model, ema, cfg, normalizer, epoch, step):
+def _save_ckpt(path, model, ema, opt, scaler, cfg, normalizer, epoch, step):
     # Write via a .tmp then rename: this path overwrites the previous checkpoint
     # every ckpt_every_epochs, and an interrupted torch.save would otherwise
     # corrupt the only copy.
@@ -124,6 +142,8 @@ def _save_ckpt(path, model, ema, cfg, normalizer, epoch, step):
     torch.save({
         "model": model.state_dict(),
         "ema": ema.state_dict(),
+        "opt": opt.state_dict(),
+        "scaler": scaler.state_dict(),
         "config": cfg,
         "norm_mean": normalizer.mean,
         "norm_std": normalizer.std,
