@@ -58,6 +58,7 @@ train:
   ema_decay: 0.999
   num_workers: 4
   log_every: 50
+  val_patches: 256               # held-out patches scored per epoch (fixed RNG)
   ckpt_every_epochs: 1           # atomic overwrite; a crash loses at most one epoch
   sample_every_epochs: 10        # unconditional samples for sanity
 

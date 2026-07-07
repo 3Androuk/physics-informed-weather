@@ -9,11 +9,12 @@ Run:
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
@@ -50,6 +51,18 @@ def main():
         persistent_workers=tc["num_workers"] > 0,
     )
     print(f"Train patches: {len(ds)} | batches/epoch: {len(loader)}")
+
+    # Held-out patches for a fixed-RNG validation loss (comparable across epochs).
+    val_loader = None
+    test_path = patch_dir / "test_patches.npy"
+    if test_path.exists():
+        val_ds = PatchDataset(test_path, normalizer)
+        n_val = min(int(tc.get("val_patches", 256)), len(val_ds))
+        val_loader = DataLoader(Subset(val_ds, range(n_val)),
+                                batch_size=tc["batch_size"], shuffle=False, num_workers=0)
+        print(f"Val patches: {n_val}")
+    else:
+        print("(no test_patches.npy — skipping val loss)")
 
     model = build_unet(cfg, use_time=True).to(device)
     diffusion = build_diffusion(cfg).to(device)
@@ -90,36 +103,89 @@ def main():
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
 
-    # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
+    # Accumulators persist across epoch boundaries: batches/epoch is rarely
     # a multiple of log_every, and resetting per epoch both drops the tail
     # batches and makes the next log divide a partial sum by the full window.
-    running, running_n = 0.0, 0
+    running, running_n, grad_sum = 0.0, 0, 0.0
+    bucket_sum, bucket_n = [0.0] * 4, [0] * 4  # loss by timestep quartile
+    t_last_log = time.time()
     for epoch in range(start_epoch, tc["epochs"] + 1):
         model.train()
+        epoch_loss, epoch_batches = 0.0, 0
+        epoch_start = time.time()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         for x0 in loader:
             x0 = x0.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
-                loss = diffusion.training_loss(model, x0)
+                loss, per_sample, t = diffusion.training_loss(model, x0, return_details=True)
             scaler.scale(loss).backward()
-            if tc["grad_clip"] > 0:
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), tc["grad_clip"])
+            scaler.unscale_(opt)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                tc["grad_clip"] if tc["grad_clip"] > 0 else float("inf"))
             scaler.step(opt)
             scaler.update()
             ema.update(model)
 
             running += loss.item()
             running_n += 1
+            grad_sum += grad_norm.item()
+            epoch_loss += loss.item()
+            epoch_batches += 1
+            q = ((t - 1) * 4 // diffusion.timesteps).clamp(max=3)
+            for k in range(4):
+                sel = q == k
+                if sel.any():
+                    bucket_sum[k] += per_sample[sel].sum().item()
+                    bucket_n[k] += int(sel.sum())
             step += 1
             if step % tc["log_every"] == 0:
-                avg = running / running_n
-                running, running_n = 0.0, 0
-                print(f"epoch {epoch:03d} step {step:07d} | loss {avg:.5f}")
+                now = time.time()
+                metrics = {
+                    "train/loss": running / running_n,
+                    "train/grad_norm": grad_sum / running_n,
+                    "train/imgs_per_sec": running_n * x0.shape[0] / (now - t_last_log),
+                    "epoch": epoch,
+                }
+                for k in range(4):  # q1 = lowest-noise quartile of t
+                    if bucket_n[k]:
+                        metrics[f"train/loss_t_q{k + 1}"] = bucket_sum[k] / bucket_n[k]
+                if use_amp:
+                    metrics["train/amp_scale"] = scaler.get_scale()
+                print(f"epoch {epoch:03d} step {step:07d} | "
+                      f"loss {metrics['train/loss']:.5f} | "
+                      f"grad {metrics['train/grad_norm']:.3f} | "
+                      f"{metrics['train/imgs_per_sec']:.1f} img/s")
                 if writer:
-                    writer.add_scalar("train/loss", avg, step)
+                    for k_, v_ in metrics.items():
+                        writer.add_scalar(k_, v_, step)
                 if wb_run is not None:
-                    wb_run.log({"train/loss": avg, "epoch": epoch}, step=step)
+                    wb_run.log(metrics, step=step)
+                running, running_n, grad_sum = 0.0, 0, 0.0
+                bucket_sum, bucket_n = [0.0] * 4, [0] * 4
+                t_last_log = now
+
+        epoch_metrics = {
+            "train/epoch_loss": epoch_loss / max(epoch_batches, 1),
+            "train/epoch_time_s": time.time() - epoch_start,
+            "epoch": epoch,
+        }
+        if device.type == "cuda":
+            epoch_metrics["train/gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30
+        if val_loader is not None:
+            epoch_metrics["val/loss"] = _val_loss(diffusion, model, val_loader, device)
+            epoch_metrics["val/loss_ema"] = _val_loss(diffusion, ema.shadow, val_loader, device)
+            print(f"epoch {epoch:03d} done | val loss {epoch_metrics['val/loss']:.5f} "
+                  f"(ema {epoch_metrics['val/loss_ema']:.5f}) | "
+                  f"{epoch_metrics['train/epoch_time_s']:.0f}s")
+        if writer:
+            for k_, v_ in epoch_metrics.items():
+                writer.add_scalar(k_, v_, step)
+        if wb_run is not None:
+            wb_run.log(epoch_metrics, step=step)
+        t_last_log = time.time()  # exclude val/sampling time from throughput
 
         if epoch % tc["sample_every_epochs"] == 0:
             sample_path = results_dir / f"uncond_epoch{epoch:03d}.png"
@@ -132,6 +198,28 @@ def main():
     if wb_run is not None:
         wb_run.finish()
     print(f"Done. Checkpoint -> {ckpt_dir / 'diffusion.pt'}")
+
+
+@torch.no_grad()
+def _val_loss(diffusion, model, val_loader, device):
+    """Noise-prediction loss on held-out patches under a fixed RNG, so every
+    epoch scores the same (timestep, noise) draws and values are comparable."""
+    was_training = model.training
+    model.eval()
+    total, n = 0.0, 0
+    devices = [device] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(0)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(0)
+        for x0 in val_loader:
+            x0 = x0.to(device, non_blocking=True)
+            loss = diffusion.training_loss(model, x0)
+            total += loss.item() * x0.shape[0]
+            n += x0.shape[0]
+    if was_training:
+        model.train()
+    return total / max(n, 1)
 
 
 def _save_ckpt(path, model, ema, opt, scaler, cfg, normalizer, epoch, step):
