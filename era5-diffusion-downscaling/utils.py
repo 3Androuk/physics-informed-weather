@@ -1,7 +1,5 @@
 """Shared utilities: config loading, seeding, device, paths."""
 
-from __future__ import annotations
-
 import os
 import random
 from pathlib import Path
