@@ -21,3 +21,6 @@ class EMA:
 
     def state_dict(self):
         return self.shadow.state_dict()
+
+    def load_state_dict(self, state_dict) -> None:
+        self.shadow.load_state_dict(state_dict)
