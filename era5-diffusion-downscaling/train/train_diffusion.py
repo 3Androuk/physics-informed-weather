@@ -72,9 +72,12 @@ def main():
         print(f"wandb: logging to {wb_run.url}")
 
     step = 0
+    # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
+    # a multiple of log_every, and resetting per epoch both drops the tail
+    # batches and makes the next log divide a partial sum by the full window.
+    running, running_n = 0.0, 0
     for epoch in range(1, tc["epochs"] + 1):
         model.train()
-        running = 0.0
         for x0 in loader:
             x0 = x0.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
@@ -89,10 +92,11 @@ def main():
             ema.update(model)
 
             running += loss.item()
+            running_n += 1
             step += 1
             if step % tc["log_every"] == 0:
-                avg = running / tc["log_every"]
-                running = 0.0
+                avg = running / running_n
+                running, running_n = 0.0, 0
                 print(f"epoch {epoch:03d} step {step:07d} | loss {avg:.5f}")
                 if writer:
                     writer.add_scalar("train/loss", avg, step)
@@ -113,6 +117,10 @@ def main():
 
 
 def _save_ckpt(path, model, ema, cfg, normalizer, epoch, step):
+    # Write via a .tmp then rename: this path overwrites the previous checkpoint
+    # every ckpt_every_epochs, and an interrupted torch.save would otherwise
+    # corrupt the only copy.
+    tmp = path.with_suffix(".pt.tmp")
     torch.save({
         "model": model.state_dict(),
         "ema": ema.state_dict(),
@@ -121,7 +129,8 @@ def _save_ckpt(path, model, ema, cfg, normalizer, epoch, step):
         "norm_std": normalizer.std,
         "epoch": epoch,
         "step": step,
-    }, path)
+    }, tmp)
+    tmp.replace(path)
 
 
 @torch.no_grad()
