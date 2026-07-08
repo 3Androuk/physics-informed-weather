@@ -85,6 +85,10 @@ def main():
             scaler.load_state_dict(ck["scaler"])
         else:
             print("(old checkpoint: no optimizer/scaler state — resuming weights only)")
+        if not (_weights_finite(model) and _weights_finite(ema.shadow)):
+            raise RuntimeError(
+                f"{ckpt_path} contains non-finite weights (training had diverged "
+                "before it was saved). Delete or move it and start fresh.")
         start_epoch = ck["epoch"] + 1
         step = ck["step"]
         print(f"Resumed from {ckpt_path} at epoch {ck['epoch']} (step {step})")
@@ -193,11 +197,23 @@ def main():
             if wb_run is not None:
                 wb_run.log({"samples": wandb.Image(str(sample_path))}, step=step)
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
+            # Never clobber the last good checkpoint with diverged weights; a
+            # NaN here is unrecoverable, so stop instead of training garbage.
+            if not (_weights_finite(model) and _weights_finite(ema.shadow)):
+                raise RuntimeError(
+                    f"non-finite weights at epoch {epoch} — training has diverged. "
+                    f"Checkpoint NOT overwritten; last good state kept at {ckpt_path}. "
+                    "Fix the cause (e.g. disable amp), then rerun with --resume.")
             _save_ckpt(ckpt_path, model, ema, opt, scaler, cfg, normalizer, epoch, step)
 
     if wb_run is not None:
         wb_run.finish()
     print(f"Done. Checkpoint -> {ckpt_dir / 'diffusion.pt'}")
+
+
+@torch.no_grad()
+def _weights_finite(model) -> bool:
+    return all(p.isfinite().all() for p in model.parameters())
 
 
 @torch.no_grad()
