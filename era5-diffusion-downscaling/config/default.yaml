@@ -54,7 +54,7 @@ train:
   lr: 2.0e-4
   weight_decay: 0.0
   grad_clip: 1.0
-  amp: true
+  amp: false                # fp16 overflowed (NaN ~epoch 30); fp32 is stable and fits easily
   ema_decay: 0.999
   num_workers: 4
   log_every: 50
@@ -69,7 +69,7 @@ directmap:
   epochs: 200
   lr: 2.0e-4
   grad_clip: 1.0
-  amp: true
+  amp: false                # match the diffusion trainer: fp32 for stability
 
 # Guided DDIM sampling (Algorithm 2, physics term dropped; sigma = 0).
 sample:
