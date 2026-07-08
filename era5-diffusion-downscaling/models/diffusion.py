@@ -53,14 +53,23 @@ class GaussianDiffusion(nn.Module):
         som = self.sqrt_one_minus_abar[t].view(-1, 1, 1, 1)
         return sa * x0 + som * noise
 
-    def training_loss(self, model: nn.Module, x0: torch.Tensor) -> torch.Tensor:
-        """DDPM simple loss: predict the injected noise (Eq. 2)."""
+    def training_loss(self, model: nn.Module, x0: torch.Tensor,
+                      return_details: bool = False):
+        """DDPM simple loss: predict the injected noise (Eq. 2).
+
+        With return_details=True also returns the detached per-sample losses
+        and the sampled timesteps (for logging loss-vs-t diagnostics).
+        """
         n = x0.shape[0]
         t = torch.randint(1, self.timesteps + 1, (n,), device=x0.device)
         noise = torch.randn_like(x0)
         x_t = self.q_sample(x0, t, noise)
         pred = model(x_t, t.float())
-        return F.mse_loss(pred, noise)
+        loss = F.mse_loss(pred, noise)
+        if not return_details:
+            return loss
+        per_sample = (pred.detach() - noise).float().pow(2).mean(dim=(1, 2, 3))
+        return loss, per_sample, t
 
     # ── guided DDIM sampling (Algorithm 2, physics term dropped, sigma=0) ──
     @torch.no_grad()
