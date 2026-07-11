@@ -33,7 +33,7 @@ from eval.metrics import (l2_norm, radial_power_spectrum,  # noqa: E402
 from sample.reconstruct import (load_diffusion, load_directmap,  # noqa: E402
                                 reconstruct_bicubic, reconstruct_diffusion,
                                 reconstruct_directmap)
-from utils import ensure_dir, get_device, load_config  # noqa: E402
+from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
 
 
 @torch.no_grad()
@@ -49,8 +49,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--wandb", action="store_true",
+                    help="Enable wandb logging (overrides config wandb.enabled).")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.wandb:
+        cfg.setdefault("wandb", {})["enabled"] = True
     device = get_device()
 
     patch_dir = Path(cfg["paths"]["patch_dir"])
@@ -114,6 +118,30 @@ def main():
     _save_table(table, results_dir)
     _plot_spectra(spectra, results_dir)
     _plot_hists(hists, results_dir)
+
+    wb_run, wandb = init_wandb(cfg, job_type="eval",
+                               extra_config={"n_test_patches": n,
+                                             "has_directmap": dm_model is not None})
+    if wb_run is not None:
+        tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1"])
+        log = {}
+        for tag, row in table.items():
+            for method, v in row.items():
+                tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
+                key = method.lower().replace(" ", "_")
+                log[f"eval/{tag}/{key}/l2"] = v["l2"]
+                log[f"eval/{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
+        log["eval/headline_table"] = tbl
+        log["eval/spectrum"] = wandb.Image(str(results_dir / "spectrum.png"))
+        log["eval/value_dist"] = wandb.Image(str(results_dir / "value_dist.png"))
+        for rc in cfg["sample"]["reconstructions"]:
+            q = results_dir / f"qualitative_{rc['ratio']}x.png"
+            if q.exists():
+                log[f"eval/qualitative_{rc['ratio']}x"] = wandb.Image(str(q))
+        wb_run.log(log)
+        wb_run.finish()
+        print("wandb: eval run logged")
+
     print(f"\nAll outputs -> {results_dir}")
 
 
