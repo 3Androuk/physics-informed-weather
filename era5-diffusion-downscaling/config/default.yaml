@@ -48,6 +48,21 @@ unet:
   dropout: 0.1
   groupnorm_groups: 32
 
+# Experimental: static (lat, lon, [altitude]) geographic conditioning via a
+# sphere-aware multiresolution hash grid. When enabled, the per-pixel location
+# embedding (n_levels * n_features_per_level channels) is concatenated to the
+# UNet input. input_dim=3 uses unit-sphere xyz (Z500 is single-level so altitude
+# is constant); set input_dim=4 + alt for multi-level variables.
+geo:
+  enabled: false
+  input_dim: 3
+  n_levels: 12
+  n_features_per_level: 2          # embedding dim = n_levels * this = 24
+  log2_hashmap_size: 19
+  base_resolution: 16
+  finest_resolution: 512
+  altitude: null                   # scalar in [0,1] if input_dim==4, else null
+
 train:
   batch_size: 16            # RTX 4070 8GB: ~6.5GB at 128px. Drop to 8 if OOM; 32 needs ~12GB.
   epochs: 200

@@ -21,7 +21,13 @@ from models.unet import build_unet  # noqa: E402
 def load_diffusion(ckpt_path, device, use_ema=True):
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
-    model = build_unet(cfg, use_time=True)
+    if cfg.get("geo", {}).get("enabled", False):
+        from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
+        geo_enc = build_geo_encoder(cfg)
+        base = build_unet(cfg, use_time=True, extra_in_channels=geo_enc.output_dim)
+        model = GeoConditionedUNet(base, geo_enc)
+    else:
+        model = build_unet(cfg, use_time=True)
     model.load_state_dict(ck["ema"] if (use_ema and "ema" in ck) else ck["model"])
     model.eval().to(device)
     diffusion = build_diffusion(cfg).to(device)
@@ -39,12 +45,16 @@ def load_directmap(ckpt_path, device):
 
 @torch.no_grad()
 def reconstruct_diffusion(diffusion, model, hf_norm, ratio, recon_cfg,
-                          eta=0.0, progress=False):
-    """Guided diffusion reconstruction of `hf_norm` degraded at `ratio`."""
+                          eta=0.0, progress=False, coords=None):
+    """Guided diffusion reconstruction of `hf_norm` degraded at `ratio`.
+
+    `coords` (B,H,W,d) is required for a geo-conditioned model and ignored
+    otherwise.
+    """
     x_g = degrade(hf_norm, ratio, smooth_sigma=recon_cfg.get("smooth_sigma", 0.0))
     return diffusion.guided_reconstruct(
         model, x_g, t_steps=recon_cfg["t_steps"], K=recon_cfg["K"], eta=eta,
-        progress=progress,
+        progress=progress, cond=coords,
     )
 
 

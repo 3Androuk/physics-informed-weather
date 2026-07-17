@@ -37,11 +37,18 @@ from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
 
 
 @torch.no_grad()
-def _batched(fn, hf, batch=16):
-    """Apply a per-batch reconstruction fn over all test patches."""
+def _batched(fn, hf, batch=16, extra=None):
+    """Apply a per-batch reconstruction fn over all test patches.
+
+    If `extra` is given (e.g. per-pixel geo coords), it is sliced in lockstep
+    and passed as the second argument to `fn`.
+    """
     outs = []
     for i in range(0, len(hf), batch):
-        outs.append(fn(hf[i:i + batch]).cpu())
+        if extra is None:
+            outs.append(fn(hf[i:i + batch]).cpu())
+        else:
+            outs.append(fn(hf[i:i + batch], extra[i:i + batch]).cpu())
     return torch.cat(outs, dim=0)
 
 
@@ -51,6 +58,8 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
+    ap.add_argument("--ckpt", default="diffusion.pt",
+                    help="diffusion checkpoint name (e.g. diffusion_geo.pt)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -62,13 +71,30 @@ def main():
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
     normalizer = load_norm_stats(patch_dir)
 
-    ds = PatchDataset(patch_dir / "test_patches.npy", normalizer)
-    n = min(cfg["eval"]["n_test_patches"], len(ds))
-    hf = torch.stack([ds[i] for i in range(n)]).to(device)        # normalized
-    hf_phys = normalizer.decode(hf.cpu())                          # physical units
-    print(f"Evaluating on {n} test patches")
+    n = min(cfg["eval"]["n_test_patches"], len(PatchDataset(patch_dir / "test_patches.npy", normalizer)))
 
-    model, diffusion, _ = load_diffusion(ckpt_dir / "diffusion.pt", device)
+    model, diffusion, cfg_ck = load_diffusion(ckpt_dir / args.ckpt, device)
+    geo_on = cfg_ck.get("geo", {}).get("enabled", False)
+
+    # Test patches (+ per-pixel coords if the diffusion model is geo-conditioned).
+    coords = None
+    if geo_on:
+        g = cfg_ck["geo"]
+        ds = PatchDataset(
+            patch_dir / "test_patches.npy", normalizer,
+            origins_path=patch_dir / "test_origins.npy",
+            coords_full_path=patch_dir / "coords_full.npz",
+            geo_input_dim=g["input_dim"], altitude=g["altitude"],
+        )
+        items = [ds[i] for i in range(n)]
+        hf = torch.stack([it[0] for it in items]).to(device)
+        coords = torch.stack([it[1] for it in items]).to(device)
+    else:
+        ds = PatchDataset(patch_dir / "test_patches.npy", normalizer)
+        hf = torch.stack([ds[i] for i in range(n)]).to(device)
+    hf_phys = normalizer.decode(hf.cpu())                          # physical units
+    print(f"Evaluating on {n} test patches | geo={geo_on}")
+
     dm_model = None
     if (ckpt_dir / "directmap.pt").exists():
         dm_model, _ = load_directmap(ckpt_dir / "directmap.pt", device)
@@ -90,8 +116,13 @@ def main():
         print(f"\n=== ratio {tag} (K={rc['K']}, t_steps={rc['t_steps']}, "
               f"smooth_sigma={rc.get('smooth_sigma', 0.0)}) ===")
 
-        diff = _batched(lambda b: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta),
-                        hf, args.batch)
+        if geo_on:
+            diff = _batched(
+                lambda b, c: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta, coords=c),
+                hf, args.batch, extra=coords)
+        else:
+            diff = _batched(lambda b: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta),
+                            hf, args.batch)
         bic = _batched(lambda b: reconstruct_bicubic(b, ratio), hf, args.batch)
         preds = {"Diffusion": diff, "Bicubic": bic}
         if dm_model is not None:

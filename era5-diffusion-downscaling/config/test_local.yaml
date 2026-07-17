@@ -1,0 +1,96 @@
+# Fast LOCAL TEST config — trains a small model on cached real ERA5 Z500
+# (1.5deg, 120x240) to validate the downscaling pipeline end to end.
+# Not for publication: short training, small UNet, few sampling steps.
+
+seed: 42
+
+paths:
+  raw_dir: datasets/raw_test
+  patch_dir: datasets/patches_test
+  ckpt_dir: checkpoints_test
+  results_dir: results_test
+  log_dir: results_test/tb
+
+data:                              # unused here (data is prepped from the cache)
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
+  gcs_token: anon
+  variable: geopotential
+  level: 500
+  train_years: [2014, 2015]
+  test_years: [2016, 2016]
+  time_stride: 1
+
+patches:
+  size: 64                         # fits the 120-lat cached grid
+  per_field: 3
+  lat_range: [-60.0, 60.0]
+
+normalize:
+  method: zscore
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: linear
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+
+unet:
+  in_channels: 1
+  out_channels: 1
+  base_channels: 48
+  channel_mults: [1, 2, 4, 8]      # 64 -> 32 -> 16 -> 8 (attn at bottleneck)
+  num_res_blocks: 2
+  time_emb_dim: 128
+  attn_resolutions: [8]
+  dropout: 0.1
+  groupnorm_groups: 8
+
+geo:
+  enabled: false
+  input_dim: 3
+  n_levels: 12
+  n_features_per_level: 2
+  log2_hashmap_size: 19
+  base_resolution: 16
+  finest_resolution: 512
+  altitude: null
+
+train:
+  batch_size: 64
+  epochs: 40
+  lr: 2.0e-4
+  weight_decay: 0.0
+  grad_clip: 1.0
+  amp: true
+  ema_decay: 0.999
+  num_workers: 0                   # Windows subprocess-safe
+  log_every: 50
+  ckpt_every_epochs: 40
+  sample_every_epochs: 999         # skip unconditional sampling during the test
+
+directmap:
+  train_ratio: 4
+  batch_size: 64
+  epochs: 40
+  lr: 2.0e-4
+  grad_clip: 1.0
+  amp: true
+
+sample:
+  ddim_eta: 0.0
+  guidance_strength: 0.0
+  interp: nearest
+  reconstructions:
+    - ratio: 4                     # in-distribution (16x16 -> 64x64)
+      K: 1
+      t_steps: [80]
+      smooth_sigma: 0.0
+    - ratio: 8                     # out-of-distribution (8x8 -> 64x64), same model
+      K: 1
+      t_steps: [120]
+      smooth_sigma: 4.0
+
+eval:
+  n_test_patches: 64
+  spectrum_bins: null
+  hist_bins: 60

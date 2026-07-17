@@ -19,19 +19,25 @@ from utils import ensure_dir, load_config  # noqa: E402
 
 
 def crop_patches(fields: np.ndarray, size: int, per_field: int,
-                 rng: np.random.Generator) -> np.ndarray:
-    """Random square crops. fields: (T, H, W) -> patches: (N, 1, size, size)."""
+                 rng: np.random.Generator):
+    """Random square crops. fields: (T, H, W) -> (patches, origins).
+
+    patches: (N, 1, size, size); origins: (N, 2) int (row, col) of each crop's
+    top-left corner, used to recover per-pixel (lat, lon) for geo-conditioning.
+    """
     t, h, w = fields.shape
     assert h >= size and w >= size, f"field {h}x{w} smaller than patch {size}"
     out = np.empty((t * per_field, 1, size, size), dtype=np.float32)
+    origins = np.empty((t * per_field, 2), dtype=np.int32)
     idx = 0
     for f in range(t):
         for _ in range(per_field):
             r = rng.integers(0, h - size + 1)
             c = rng.integers(0, w - size + 1)
             out[idx, 0] = fields[f, r:r + size, c:c + size]
+            origins[idx] = (r, c)
             idx += 1
-    return out
+    return out, origins
 
 
 def _save_npy_atomic(path: Path, arr: np.ndarray) -> None:
@@ -61,34 +67,47 @@ def main():
     test_out = patch_dir / "test_patches.npy"
     stats_out = patch_dir / "norm_stats.npz"
 
+    train_origins_out = patch_dir / "train_origins.npy"
+    test_origins_out = patch_dir / "test_origins.npy"
+
     # ── Train patches + z-score stats (skip if already built) ─────────────
     # The two splits use independent RNGs so either can be regenerated on its
     # own without perturbing the other.
-    if not args.force and train_out.exists() and stats_out.exists():
+    if (not args.force and train_out.exists() and stats_out.exists()
+            and train_origins_out.exists()):
         print(f"[skip] {train_out.name} + {stats_out.name} already exist")
     else:
         train_fields = np.load(raw_dir / "train.npy", mmap_mode="r")  # slices read lazily
         rng = np.random.default_rng(seed)
-        train_patches = crop_patches(train_fields, size, per_field, rng)
+        train_patches, train_origins = crop_patches(train_fields, size, per_field, rng)
         # Shuffle to decorrelate consecutive crops from the same field.
-        train_patches = train_patches[rng.permutation(len(train_patches))]
+        perm = rng.permutation(len(train_patches))
+        train_patches = train_patches[perm]
+        train_origins = train_origins[perm]
         mean = float(train_patches.mean())
         std = float(train_patches.std())
         _save_npy_atomic(train_out, train_patches)
+        _save_npy_atomic(train_origins_out, train_origins)
         np.savez(stats_out, mean=mean, std=std, size=size)
         print(f"train patches {train_patches.shape} | z-score mean={mean:.3f} std={std:.3f}")
-        del train_fields, train_patches
+        del train_fields, train_patches, train_origins
 
     # ── Test patches (skip if already built) ──────────────────────────────
-    if not args.force and test_out.exists():
+    if not args.force and test_out.exists() and test_origins_out.exists():
         print(f"[skip] {test_out.name} already exists")
     else:
         test_fields = np.load(raw_dir / "test.npy", mmap_mode="r")
         rng = np.random.default_rng(seed + 1)
-        test_patches = crop_patches(test_fields, size, per_field, rng)
+        test_patches, test_origins = crop_patches(test_fields, size, per_field, rng)
         _save_npy_atomic(test_out, test_patches)
+        _save_npy_atomic(test_origins_out, test_origins)
         print(f"test patches {test_patches.shape}")
-        del test_fields, test_patches
+        del test_fields, test_patches, test_origins
+
+    # Copy global lat/lon so the dataset can recover per-pixel coordinates for
+    # geo-conditioning (origins index into these arrays).
+    coords = np.load(raw_dir / "coords.npz")
+    np.savez(patch_dir / "coords_full.npz", lat=coords["lat"], lon=coords["lon"])
 
     print(f"-> {patch_dir}")
 

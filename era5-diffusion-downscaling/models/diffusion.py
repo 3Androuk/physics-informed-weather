@@ -53,9 +53,13 @@ class GaussianDiffusion(nn.Module):
         som = self.sqrt_one_minus_abar[t].view(-1, 1, 1, 1)
         return sa * x0 + som * noise
 
-    def training_loss(self, model: nn.Module, x0: torch.Tensor,
+    def training_loss(self, model: nn.Module, x0: torch.Tensor, cond=None,
                       return_details: bool = False):
         """DDPM simple loss: predict the injected noise (Eq. 2).
+
+        `cond` (optional) is extra conditioning forwarded to the model — e.g. the
+        per-pixel geographic coordinates (B, H, W, d) for a geo-conditioned UNet.
+        Conditioning is never noised; only the atmospheric field x0 is.
 
         With return_details=True also returns the detached per-sample losses
         and the sampled timesteps (for logging loss-vs-t diagnostics).
@@ -64,7 +68,7 @@ class GaussianDiffusion(nn.Module):
         t = torch.randint(1, self.timesteps + 1, (n,), device=x0.device)
         noise = torch.randn_like(x0)
         x_t = self.q_sample(x0, t, noise)
-        pred = model(x_t, t.float())
+        pred = model(x_t, t.float()) if cond is None else model(x_t, t.float(), cond)
         loss = F.mse_loss(pred, noise)
         if not return_details:
             return loss
@@ -82,6 +86,7 @@ class GaussianDiffusion(nn.Module):
         eta: float = 0.0,
         stride: int = 1,
         progress: bool = False,
+        cond=None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -127,7 +132,7 @@ class GaussianDiffusion(nn.Module):
                 a_prev = self.alphas_cumprod[tprev]
 
                 t_batch = torch.full((x.shape[0],), ti, device=device, dtype=torch.float32)
-                eps_theta = model(x, t_batch)
+                eps_theta = model(x, t_batch) if cond is None else model(x, t_batch, cond)
 
                 x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
                 sigma = eta * (

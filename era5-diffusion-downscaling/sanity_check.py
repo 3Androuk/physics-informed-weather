@@ -105,8 +105,9 @@ def main():
     # 8. Patch cropping + normalizer + dataset round-trip.
     rng = np.random.default_rng(0)
     fields = rng.normal(54000, 3000, size=(3, 64, 96)).astype(np.float32)
-    patches = crop_patches(fields, size=32, per_field=4, rng=rng)
+    patches, origins = crop_patches(fields, size=32, per_field=4, rng=rng)
     check("crop_patches shape", patches.shape == (12, 1, 32, 32))
+    check("crop_patches origins shape", origins.shape == (12, 2))
     norm = Normalizer(float(patches.mean()), float(patches.std()))
     rt = norm.decode(norm.encode(torch.from_numpy(patches[0])))
     check("normalizer round-trip", torch.allclose(rt, torch.from_numpy(patches[0]), atol=1e-2))

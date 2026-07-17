@@ -43,20 +43,41 @@ def main():
     ckpt_dir = ensure_dir(cfg["paths"]["ckpt_dir"])
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
 
+    geo_on = cfg.get("geo", {}).get("enabled", False)
+    ckpt_name = "diffusion_geo.pt" if geo_on else "diffusion.pt"
+
     normalizer = load_norm_stats(patch_dir)
-    ds = PatchDataset(patch_dir / "train_patches.npy", normalizer)
+    if geo_on:
+        gcfg = cfg["geo"]
+        ds = PatchDataset(
+            patch_dir / "train_patches.npy", normalizer,
+            origins_path=patch_dir / "train_origins.npy",
+            coords_full_path=patch_dir / "coords_full.npz",
+            geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
+        )
+    else:
+        ds = PatchDataset(patch_dir / "train_patches.npy", normalizer)
     loader = DataLoader(
         ds, batch_size=tc["batch_size"], shuffle=True,
         num_workers=tc["num_workers"], pin_memory=True, drop_last=True,
         persistent_workers=tc["num_workers"] > 0,
     )
-    print(f"Train patches: {len(ds)} | batches/epoch: {len(loader)}")
+    print(f"Train patches: {len(ds)} | batches/epoch: {len(loader)} | geo={geo_on}")
 
     # Held-out patches for a fixed-RNG validation loss (comparable across epochs).
     val_loader = None
     test_path = patch_dir / "test_patches.npy"
     if test_path.exists():
-        val_ds = PatchDataset(test_path, normalizer)
+        if geo_on:
+            gcfg = cfg["geo"]
+            val_ds = PatchDataset(
+                test_path, normalizer,
+                origins_path=patch_dir / "test_origins.npy",
+                coords_full_path=patch_dir / "coords_full.npz",
+                geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
+            )
+        else:
+            val_ds = PatchDataset(test_path, normalizer)
         n_val = min(int(tc.get("val_patches", 256)), len(val_ds))
         val_loader = DataLoader(Subset(val_ds, range(n_val)),
                                 batch_size=tc["batch_size"], shuffle=False, num_workers=0)
@@ -64,7 +85,13 @@ def main():
     else:
         print("(no test_patches.npy — skipping val loss)")
 
-    model = build_unet(cfg, use_time=True).to(device)
+    if geo_on:
+        from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
+        geo_enc = build_geo_encoder(cfg)
+        base = build_unet(cfg, use_time=True, extra_in_channels=geo_enc.output_dim)
+        model = GeoConditionedUNet(base, geo_enc).to(device)
+    else:
+        model = build_unet(cfg, use_time=True).to(device)
     diffusion = build_diffusion(cfg).to(device)
     ema = EMA(model, decay=tc["ema_decay"])
     n_params = sum(p.numel() for p in model.parameters())
@@ -75,7 +102,7 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     start_epoch, step = 1, 0
-    ckpt_path = ckpt_dir / "diffusion.pt"
+    ckpt_path = ckpt_dir / ckpt_name
     if args.resume and ckpt_path.exists():
         ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
@@ -119,11 +146,17 @@ def main():
         epoch_start = time.time()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
-        for x0 in loader:
-            x0 = x0.to(device, non_blocking=True)
+        for batch in loader:
+            if geo_on:
+                x0, coords = batch
+                x0 = x0.to(device, non_blocking=True)
+                coords = coords.to(device, non_blocking=True)
+            else:
+                x0, coords = batch.to(device, non_blocking=True), None
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
-                loss, per_sample, t = diffusion.training_loss(model, x0, return_details=True)
+                loss, per_sample, t = diffusion.training_loss(
+                    model, x0, cond=coords, return_details=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -191,7 +224,8 @@ def main():
             wb_run.log(epoch_metrics, step=step)
         t_last_log = time.time()  # exclude val/sampling time from throughput
 
-        if epoch % tc["sample_every_epochs"] == 0:
+        if epoch % tc["sample_every_epochs"] == 0 and not geo_on:
+            # Unconditional sampling needs coords for the geo model; skip it there.
             sample_path = results_dir / f"uncond_epoch{epoch:03d}.png"
             _save_samples(diffusion, ema.shadow, normalizer, device, sample_path, cfg)
             if wb_run is not None:
@@ -208,7 +242,7 @@ def main():
 
     if wb_run is not None:
         wb_run.finish()
-    print(f"Done. Checkpoint -> {ckpt_dir / 'diffusion.pt'}")
+    print(f"Done. Checkpoint -> {ckpt_path}")
 
 
 @torch.no_grad()
@@ -228,9 +262,14 @@ def _val_loss(diffusion, model, val_loader, device):
         torch.manual_seed(0)
         if device.type == "cuda":
             torch.cuda.manual_seed_all(0)
-        for x0 in val_loader:
-            x0 = x0.to(device, non_blocking=True)
-            loss = diffusion.training_loss(model, x0)
+        for batch in val_loader:
+            if isinstance(batch, (list, tuple)):
+                x0, coords = batch
+                x0 = x0.to(device, non_blocking=True)
+                coords = coords.to(device, non_blocking=True)
+            else:
+                x0, coords = batch.to(device, non_blocking=True), None
+            loss = diffusion.training_loss(model, x0, cond=coords)
             total += loss.item() * x0.shape[0]
             n += x0.shape[0]
     if was_training:

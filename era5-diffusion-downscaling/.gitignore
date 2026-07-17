@@ -5,6 +5,7 @@ datasets/raw/
 datasets/patches/
 checkpoints/
 results/
+results_test/
 *.npy
 *.npz
 *.pt

@@ -199,11 +199,11 @@ class UNet(nn.Module):
         return self.conv_out(F.silu(self.norm_out(h)))
 
 
-def build_unet(cfg: dict, use_time: bool = True) -> UNet:
+def build_unet(cfg: dict, use_time: bool = True, extra_in_channels: int = 0) -> UNet:
     u = cfg["unet"]
     return UNet(
         image_size=cfg["patches"]["size"],
-        in_channels=u["in_channels"],
+        in_channels=u["in_channels"] + extra_in_channels,
         out_channels=u["out_channels"],
         base_channels=u["base_channels"],
         channel_mults=tuple(u["channel_mults"]),
