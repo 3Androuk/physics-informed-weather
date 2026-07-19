@@ -31,9 +31,15 @@ from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E4
 from utils import ensure_dir, get_device, load_config  # noqa: E402
 
 
-def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch):
+def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon"):
+    it = range(0, len(hf), batch)
+    try:
+        from tqdm import tqdm
+        it = tqdm(it, desc=label)
+    except ImportError:
+        pass
     outs = []
-    for i in range(0, len(hf), batch):
+    for i in it:
         c = None if coords is None else coords[i:i + batch]
         outs.append(reconstruct_diffusion(diffusion, model, hf[i:i + batch], ratio, rc,
                                           eta=eta, coords=c).cpu())
@@ -87,8 +93,10 @@ def main():
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]; tag = f"{ratio}x"
         preds = {
-            "Geo": _recon(geo_diff, geo_model, hf, ratio, rc, eta, coords, args.batch),
-            "No-geo": _recon(base_diff, base_model, hf, ratio, rc, eta, None, args.batch),
+            "Geo": _recon(geo_diff, geo_model, hf, ratio, rc, eta, coords, args.batch,
+                          label=f"{tag} Geo"),
+            "No-geo": _recon(base_diff, base_model, hf, ratio, rc, eta, None, args.batch,
+                             label=f"{tag} No-geo"),
             "Bicubic": torch.cat([reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
                                   for i in range(0, len(hf), args.batch)]),
         }
@@ -99,11 +107,39 @@ def main():
             spectra[f"{name} {tag}"] = radial_power_spectrum(pp)
             print(f"  {tag} {name:8s} | L2 {row[name]['l2']:.4f} | spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
         table[tag] = row
+        _qualitative(normalizer, hf, preds, ratio, rc,
+                     results_dir / f"geo_ablation_qualitative_{tag}.png")
 
     with open(results_dir / "geo_ablation.json", "w") as f:
         json.dump(table, f, indent=2)
     _plot(spectra, results_dir / "geo_ablation_spectrum.png")
-    print(f"\nSaved -> {results_dir / 'geo_ablation.json'} and geo_ablation_spectrum.png")
+    print(f"\nSaved -> {results_dir / 'geo_ablation.json'}, geo_ablation_spectrum.png, "
+          f"and geo_ablation_qualitative_*.png")
+
+
+def _qualitative(normalizer, hf, preds, ratio, rc, path, idx=0):
+    """Side-by-side panels on a SHARED color scale (taken from the reference),
+    so residual noise or bias shows as a visible difference instead of being
+    hidden by per-panel autoscaling."""
+    from data.degrade import degrade
+    lf = degrade(hf[idx:idx + 1].cpu(), ratio, rc.get("smooth_sigma", 0.0))
+    panels = [("Input (LF)", lf),
+              ("Bicubic", preds["Bicubic"][idx:idx + 1]),
+              ("No-geo", preds["No-geo"][idx:idx + 1]),
+              ("Geo", preds["Geo"][idx:idx + 1]),
+              ("Reference", hf[idx:idx + 1].cpu())]
+    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
+    vmin, vmax = float(ref.min()), float(ref.max())
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
+    for ax, (title, t) in zip(axes, panels):
+        ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
+                  vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        ax.axis("off")
+    fig.suptitle(f"{ratio}x reconstruction: geo vs no-geo (shared color scale)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _plot(spectra, path):
