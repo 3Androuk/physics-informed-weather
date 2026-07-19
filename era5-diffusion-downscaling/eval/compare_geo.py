@@ -28,7 +28,7 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from eval.metrics import radial_power_spectrum, spectrum_log_l1, l2_norm  # noqa: E402
 from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
                                 reconstruct_diffusion)
-from utils import ensure_dir, get_device, load_config  # noqa: E402
+from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
 
 
 def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon"):
@@ -70,8 +70,12 @@ def main():
     ap.add_argument("--geo-ckpt", default="diffusion_geo.pt")
     ap.add_argument("--base-ckpt", default="diffusion.pt")
     ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--wandb", action="store_true",
+                    help="Enable wandb logging (overrides config wandb.enabled).")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.wandb:
+        cfg.setdefault("wandb", {})["enabled"] = True
     device = get_device()
     eta = cfg["sample"]["ddim_eta"]
 
@@ -115,6 +119,29 @@ def main():
     _plot(spectra, results_dir / "geo_ablation_spectrum.png")
     print(f"\nSaved -> {results_dir / 'geo_ablation.json'}, geo_ablation_spectrum.png, "
           f"and geo_ablation_qualitative_*.png")
+
+    wb_run, wandb = init_wandb(cfg, job_type="compare_geo",
+                               extra_config={"n_test_patches": n,
+                                             "geo_ckpt": args.geo_ckpt,
+                                             "base_ckpt": args.base_ckpt})
+    if wb_run is not None:
+        tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1"])
+        log = {}
+        for tag, row in table.items():
+            for method, v in row.items():
+                tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
+                key = method.lower().replace("-", "_")
+                log[f"ablation/{tag}/{key}/l2"] = v["l2"]
+                log[f"ablation/{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
+        log["ablation/table"] = tbl
+        log["ablation/spectrum"] = wandb.Image(str(results_dir / "geo_ablation_spectrum.png"))
+        for rc in cfg["sample"]["reconstructions"]:
+            q = results_dir / f"geo_ablation_qualitative_{rc['ratio']}x.png"
+            if q.exists():
+                log[f"ablation/qualitative_{rc['ratio']}x"] = wandb.Image(str(q))
+        wb_run.log(log)
+        wb_run.finish()
+        print("wandb: ablation run logged")
 
 
 def _qualitative(normalizer, hf, preds, ratio, rc, path, idx=0):
