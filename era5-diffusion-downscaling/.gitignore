@@ -1,10 +1,11 @@
 __pycache__/
 *.pyc
 .venv/
-datasets/raw/
-datasets/patches/
+datasets/
 checkpoints/
+checkpoints_t2m/
 results/
+results_t2m/
 results_test/
 *.npy
 *.npz

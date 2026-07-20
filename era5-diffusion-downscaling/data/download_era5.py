@@ -59,7 +59,9 @@ def _open_da(dcfg, lat_range, timeout, chunk_time):
         ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": chunk_time},
                           storage_options=storage)
 
-    da = ds[dcfg["variable"]].sel(level=dcfg["level"])
+    da = ds[dcfg["variable"]]
+    if dcfg.get("level") is not None:  # surface variables (e.g. 2m_temperature) have no level dim
+        da = da.sel(level=dcfg["level"])
     da = da.transpose("time", "latitude", "longitude")
     lat = da["latitude"].values
     lo, hi = lat_range
