@@ -314,7 +314,7 @@ def _save_samples(diffusion, model, normalizer, device, path, cfg):
     for ax, s in zip(axes, samples):
         ax.imshow(s[0], cmap="RdBu_r")
         ax.axis("off")
-    fig.suptitle("Unconditional diffusion samples (Z500)")
+    fig.suptitle(f"Unconditional diffusion samples ({cfg['data']['variable']})")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)

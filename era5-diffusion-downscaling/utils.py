@@ -54,10 +54,16 @@ def init_wandb(cfg: dict, job_type: str, extra_config: dict | None = None):
         return None, None
     import wandb
     config = {**cfg, **(extra_config or {})}
+    # Default name identifies variable + geo mode + job, so runs launched from
+    # a shared config (e.g. baseline vs --geo) can't end up mislabeled.
+    name = wcfg.get("name")
+    if not name and "data" in cfg:
+        geo_tag = "geo" if cfg.get("geo", {}).get("enabled") else "base"
+        name = f"{cfg['data']['variable']}-{geo_tag}-{job_type}"
     run = wandb.init(
         project=wcfg.get("project", "era5-diffusion-downscaling"),
         entity=wcfg.get("entity"),
-        name=wcfg.get("name"),
+        name=name,
         job_type=job_type,
         config=config,
     )
