@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
+from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.ema import EMA  # noqa: E402
@@ -68,6 +69,10 @@ def main():
         persistent_workers=tc["num_workers"] > 0,
     )
     print(f"Train patches: {len(ds)} | batches/epoch: {len(loader)} | geo={geo_on}")
+
+    # Reference patches (physical units) for the periodic sample-spectrum metric.
+    _spec_ref = normalizer.decode(torch.stack(
+        [ds[i][0] if geo_on else ds[i] for i in range(min(64, len(ds)))]))
 
     # Held-out patches for a fixed-RNG validation loss (comparable across epochs).
     val_loader = None
@@ -237,8 +242,18 @@ def main():
                 # (first training patches) so the learned location prior is
                 # comparable across epochs.
                 sample_cond = torch.stack([ds[i][1] for i in range(4)]).to(device)
-            _save_samples(diffusion, ema.shadow, normalizer, device, sample_path, cfg,
-                          cond=sample_cond)
+            samples_phys = _save_samples(diffusion, ema.shadow, normalizer, device,
+                                         sample_path, cfg, cond=sample_cond)
+            # Spectral distance of the samples to real patches: MSE-type losses
+            # are nearly blind to spectral defects (speckle = excess high-k
+            # energy), so track it explicitly across training.
+            if _spec_ref is not None:
+                spec_err = spectrum_log_l1(samples_phys, _spec_ref)
+                print(f"  samples spectrum_log_l1 vs train patches: {spec_err:.4f}")
+                if writer:
+                    writer.add_scalar("samples/spectrum_log_l1", spec_err, step)
+                if wb_run is not None:
+                    wb_run.log({"samples/spectrum_log_l1": spec_err}, step=step)
             if wb_run is not None:
                 wb_run.log({"samples": wandb.Image(str(sample_path))}, step=step)
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
@@ -327,6 +342,7 @@ def _save_samples(diffusion, model, normalizer, device, path, cfg, cond=None):
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved samples -> {path}")
+    return samples
 
 
 if __name__ == "__main__":
