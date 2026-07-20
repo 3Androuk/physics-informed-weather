@@ -2,11 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 datasets/
-checkpoints/
-checkpoints_t2m/
-results/
-results_t2m/
-results_test/
+checkpoints*/
+results*/
 *.npy
 *.npz
 *.pt
