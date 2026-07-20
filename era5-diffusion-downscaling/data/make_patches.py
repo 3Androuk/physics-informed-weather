@@ -19,7 +19,7 @@ from utils import ensure_dir, load_config  # noqa: E402
 
 
 def crop_patches(fields: np.ndarray, size: int, per_field: int,
-                 rng: np.random.Generator):
+                 rng: np.random.Generator, desc: str = "crop"):
     """Random square crops. fields: (T, H, W) -> (patches, origins).
 
     patches: (N, 1, size, size); origins: (N, 2) int (row, col) of each crop's
@@ -29,8 +29,14 @@ def crop_patches(fields: np.ndarray, size: int, per_field: int,
     assert h >= size and w >= size, f"field {h}x{w} smaller than patch {size}"
     out = np.empty((t * per_field, 1, size, size), dtype=np.float32)
     origins = np.empty((t * per_field, 2), dtype=np.int32)
+    field_iter = range(t)
+    try:
+        from tqdm import tqdm
+        field_iter = tqdm(field_iter, desc=desc)
+    except ImportError:
+        pass
     idx = 0
-    for f in range(t):
+    for f in field_iter:
         for _ in range(per_field):
             r = rng.integers(0, h - size + 1)
             c = rng.integers(0, w - size + 1)
@@ -79,7 +85,8 @@ def main():
     else:
         train_fields = np.load(raw_dir / "train.npy", mmap_mode="r")  # slices read lazily
         rng = np.random.default_rng(seed)
-        train_patches, train_origins = crop_patches(train_fields, size, per_field, rng)
+        train_patches, train_origins = crop_patches(train_fields, size, per_field, rng,
+                                                    desc="train crops")
         # Shuffle to decorrelate consecutive crops from the same field.
         perm = rng.permutation(len(train_patches))
         train_patches = train_patches[perm]
@@ -98,7 +105,8 @@ def main():
     else:
         test_fields = np.load(raw_dir / "test.npy", mmap_mode="r")
         rng = np.random.default_rng(seed + 1)
-        test_patches, test_origins = crop_patches(test_fields, size, per_field, rng)
+        test_patches, test_origins = crop_patches(test_fields, size, per_field, rng,
+                                                  desc="test crops")
         _save_npy_atomic(test_out, test_patches)
         _save_npy_atomic(test_origins_out, test_origins)
         print(f"test patches {test_patches.shape}")
