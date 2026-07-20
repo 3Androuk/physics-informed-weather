@@ -229,10 +229,16 @@ def main():
             wb_run.log(epoch_metrics, step=step)
         t_last_log = time.time()  # exclude val/sampling time from throughput
 
-        if epoch % tc["sample_every_epochs"] == 0 and not geo_on:
-            # Unconditional sampling needs coords for the geo model; skip it there.
+        if epoch % tc["sample_every_epochs"] == 0:
             sample_path = results_dir / f"uncond_epoch{epoch:03d}.png"
-            _save_samples(diffusion, ema.shadow, normalizer, device, sample_path, cfg)
+            sample_cond = None
+            if geo_on:
+                # The geo model always needs coords; sample at 4 FIXED locations
+                # (first training patches) so the learned location prior is
+                # comparable across epochs.
+                sample_cond = torch.stack([ds[i][1] for i in range(4)]).to(device)
+            _save_samples(diffusion, ema.shadow, normalizer, device, sample_path, cfg,
+                          cond=sample_cond)
             if wb_run is not None:
                 wb_run.log({"samples": wandb.Image(str(sample_path))}, step=step)
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
@@ -302,19 +308,21 @@ def _save_ckpt(path, model, ema, opt, scaler, cfg, normalizer, epoch, step):
 
 
 @torch.no_grad()
-def _save_samples(diffusion, model, normalizer, device, path, cfg):
+def _save_samples(diffusion, model, normalizer, device, path, cfg, cond=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     size = cfg["patches"]["size"]
-    samples = diffusion.sample_unconditional(model, (4, 1, size, size), device, n_steps=100)
+    samples = diffusion.sample_unconditional(model, (4, 1, size, size), device,
+                                             n_steps=100, cond=cond)
     samples = normalizer.decode(samples.cpu()).numpy()
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
     for ax, s in zip(axes, samples):
         ax.imshow(s[0], cmap="RdBu_r")
         ax.axis("off")
-    fig.suptitle(f"Unconditional diffusion samples ({cfg['data']['variable']})")
+    mode = "Geo-conditioned (fixed locations)" if cond is not None else "Unconditional"
+    fig.suptitle(f"{mode} diffusion samples ({cfg['data']['variable']})")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)

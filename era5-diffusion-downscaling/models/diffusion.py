@@ -148,8 +148,14 @@ class GaussianDiffusion(nn.Module):
         return x_g
 
     @torch.no_grad()
-    def sample_unconditional(self, model: nn.Module, shape, device, n_steps=100, eta=0.0):
-        """Full DDIM sampling from pure noise (sanity check: plausible fields)."""
+    def sample_unconditional(self, model: nn.Module, shape, device, n_steps=100, eta=0.0,
+                             cond=None):
+        """Full DDIM sampling from pure noise (sanity check: plausible fields).
+
+        `cond` (optional, (N,H,W,d)) supplies per-pixel coords for a
+        geo-conditioned model — samples then show the learned prior at those
+        fixed locations.
+        """
         seq = torch.linspace(0, self.timesteps, n_steps + 1).round().long().tolist()
         seq = sorted(set(min(s, self.timesteps) for s in seq))
         x = torch.randn(shape, device=device)
@@ -158,7 +164,7 @@ class GaussianDiffusion(nn.Module):
             a_i = self.alphas_cumprod[ti]
             a_prev = self.alphas_cumprod[tprev]
             t_batch = torch.full((shape[0],), ti, device=device, dtype=torch.float32)
-            eps_theta = model(x, t_batch)
+            eps_theta = model(x, t_batch) if cond is None else model(x, t_batch, cond)
             x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
             sigma = eta * (((1 - a_prev) / (1 - a_i)).clamp(min=0).sqrt()
                            * (1 - a_i / a_prev).clamp(min=0).sqrt())
