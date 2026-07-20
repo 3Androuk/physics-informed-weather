@@ -31,10 +31,15 @@ def main():
                     help="Enable wandb logging (overrides config wandb.enabled).")
     ap.add_argument("--resume", action="store_true",
                     help="Resume from paths.ckpt_dir/diffusion.pt if it exists.")
+    ap.add_argument("--geo", action="store_true",
+                    help="Force geo.enabled: true (overrides config), so baseline "
+                         "and geo runs can be chained without editing the config.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
         cfg.setdefault("wandb", {})["enabled"] = True
+    if args.geo:
+        cfg.setdefault("geo", {})["enabled"] = True
     set_seed(cfg["seed"])
     device = get_device()
 
