@@ -158,14 +158,16 @@ def main():
                                extra_config={"n_test_patches": n,
                                              "has_directmap": dm_model is not None})
     if wb_run is not None:
+        # Scalars go to the run SUMMARY (columns in the runs table), not log():
+        # a one-shot eval otherwise creates one single-point chart per metric.
         tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1"])
         log = {}
         for tag, row in table.items():
             for method, v in row.items():
                 tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
                 key = method.lower().replace(" ", "_")
-                log[f"eval/{tag}/{key}/l2"] = v["l2"]
-                log[f"eval/{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
+                wb_run.summary[f"{tag}/{key}/l2"] = v["l2"]
+                wb_run.summary[f"{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
         log["eval/headline_table"] = tbl
         log["eval/spectrum"] = wandb.Image(str(results_dir / "spectrum.png"))
         log["eval/value_dist"] = wandb.Image(str(results_dir / "value_dist.png"))

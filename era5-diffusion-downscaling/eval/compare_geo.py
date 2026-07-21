@@ -168,6 +168,8 @@ def main():
                                              "projection": args.project,
                                              "ensemble": args.ensemble})
     if wb_run is not None:
+        # Scalars go to the run SUMMARY (columns in the runs table), not log():
+        # a one-shot eval otherwise creates one single-point chart per metric.
         tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1"])
         log = {}
         for tag, row in table.items():
@@ -176,13 +178,13 @@ def main():
                     for method, v in erow.items():
                         key = method.lower().replace("-", "_")
                         for mk, mv in v.items():
-                            log[f"ablation/ensemble/{etag}/{key}/{mk}"] = mv
+                            wb_run.summary[f"ensemble/{etag}/{key}/{mk}"] = mv
                 continue
             for method, v in row.items():
                 tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
                 key = method.lower().replace("-", "_")
-                log[f"ablation/{tag}/{key}/l2"] = v["l2"]
-                log[f"ablation/{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
+                wb_run.summary[f"{tag}/{key}/l2"] = v["l2"]
+                wb_run.summary[f"{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
         log["ablation/table"] = tbl
         log["ablation/spectrum"] = wandb.Image(str(results_dir / "geo_ablation_spectrum.png"))
         for rc in cfg["sample"]["reconstructions"]:
