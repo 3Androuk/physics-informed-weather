@@ -21,6 +21,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -31,7 +32,8 @@ from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E4
 from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
 
 
-def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon"):
+def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
+           project=False):
     it = range(0, len(hf), batch)
     try:
         from tqdm import tqdm
@@ -42,7 +44,7 @@ def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon"):
     for i in it:
         c = None if coords is None else coords[i:i + batch]
         outs.append(reconstruct_diffusion(diffusion, model, hf[i:i + batch], ratio, rc,
-                                          eta=eta, coords=c).cpu())
+                                          eta=eta, coords=c, project=project).cpu())
     return torch.cat(outs, dim=0)
 
 
@@ -72,6 +74,14 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
+    ap.add_argument("--project", action="store_true",
+                    help="Per-step data-consistency projection: coarsen(x0) == LF "
+                         "enforced at every DDIM step.")
+    ap.add_argument("--ensemble", type=int, default=1,
+                    help="Ensemble members per patch (>1 adds ensemble-mean L2, "
+                         "CRPS, and spread on a subset of patches).")
+    ap.add_argument("--ensemble-patches", type=int, default=64,
+                    help="How many test patches the ensemble metrics use.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -89,7 +99,8 @@ def main():
     geo_model, geo_diff, geo_cfg = load_diffusion(ckpt_dir / args.geo_ckpt, device)
     base_model, base_diff, _ = load_diffusion(ckpt_dir / args.base_ckpt, device)
     assert geo_cfg["geo"]["enabled"], f"{args.geo_ckpt} is not a geo checkpoint"
-    print(f"Comparing geo ({args.geo_ckpt}) vs baseline ({args.base_ckpt}) on {n} patches")
+    print(f"Comparing geo ({args.geo_ckpt}) vs baseline ({args.base_ckpt}) on {n} patches"
+          f"{' | projection ON' if args.project else ''}")
 
     hf, hf_phys, coords = _load_test(patch_dir, normalizer, n, geo_cfg["geo"], device)
 
@@ -98,9 +109,9 @@ def main():
         ratio = rc["ratio"]; tag = f"{ratio}x"
         preds = {
             "Geo": _recon(geo_diff, geo_model, hf, ratio, rc, eta, coords, args.batch,
-                          label=f"{tag} Geo"),
+                          label=f"{tag} Geo", project=args.project),
             "No-geo": _recon(base_diff, base_model, hf, ratio, rc, eta, None, args.batch,
-                             label=f"{tag} No-geo"),
+                             label=f"{tag} No-geo", project=args.project),
             "Bicubic": torch.cat([reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
                                   for i in range(0, len(hf), args.batch)]),
         }
@@ -114,6 +125,36 @@ def main():
         _qualitative(normalizer, hf, preds, ratio, rc,
                      results_dir / f"geo_ablation_qualitative_{tag}.png")
 
+    # ── Ensemble metrics (subset of patches; diffusion methods only) ──────
+    if args.ensemble > 1:
+        from eval.metrics import crps_ensemble
+        n_e = min(args.ensemble_patches, len(hf))
+        hf_e, hf_e_phys = hf[:n_e], hf_phys[:n_e]
+        coords_e = None if coords is None else coords[:n_e]
+        print(f"\nEnsemble metrics: {args.ensemble} members x {n_e} patches")
+        ens = {}
+        for rc in cfg["sample"]["reconstructions"]:
+            ratio = rc["ratio"]; tag = f"{ratio}x"
+            for name, (dif, mod, c) in {"Geo": (geo_diff, geo_model, coords_e),
+                                        "No-geo": (base_diff, base_model, None)}.items():
+                members = [normalizer.decode(
+                    _recon(dif, mod, hf_e, ratio, rc, eta, c, args.batch,
+                           label=f"{tag} {name} member {m + 1}/{args.ensemble}",
+                           project=args.project))
+                    for m in range(args.ensemble)]
+                stack = torch.stack(members)
+                row = {
+                    "single_l2": float(np.mean([l2_norm(p, hf_e_phys) for p in members])),
+                    "ensemble_mean_l2": l2_norm(stack.mean(0), hf_e_phys),
+                    "crps": crps_ensemble(members, hf_e_phys),
+                    "spread": float(stack.std(0).mean()),
+                }
+                ens.setdefault(tag, {})[name] = row
+                print(f"  {tag} {name:8s} | single L2 {row['single_l2']:.4f} | "
+                      f"ens-mean L2 {row['ensemble_mean_l2']:.4f} | "
+                      f"CRPS {row['crps']:.4f} | spread {row['spread']:.4f}")
+        table["ensemble"] = ens
+
     with open(results_dir / "geo_ablation.json", "w") as f:
         json.dump(table, f, indent=2)
     _plot(spectra, results_dir / "geo_ablation_spectrum.png")
@@ -123,11 +164,20 @@ def main():
     wb_run, wandb = init_wandb(cfg, job_type="compare_geo",
                                extra_config={"n_test_patches": n,
                                              "geo_ckpt": args.geo_ckpt,
-                                             "base_ckpt": args.base_ckpt})
+                                             "base_ckpt": args.base_ckpt,
+                                             "projection": args.project,
+                                             "ensemble": args.ensemble})
     if wb_run is not None:
         tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1"])
         log = {}
         for tag, row in table.items():
+            if tag == "ensemble":
+                for etag, erow in row.items():
+                    for method, v in erow.items():
+                        key = method.lower().replace("-", "_")
+                        for mk, mv in v.items():
+                            log[f"ablation/ensemble/{etag}/{key}/{mk}"] = mv
+                continue
             for method, v in row.items():
                 tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
                 key = method.lower().replace("-", "_")

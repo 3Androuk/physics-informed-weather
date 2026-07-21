@@ -45,16 +45,19 @@ def load_directmap(ckpt_path, device):
 
 @torch.no_grad()
 def reconstruct_diffusion(diffusion, model, hf_norm, ratio, recon_cfg,
-                          eta=0.0, progress=False, coords=None):
+                          eta=0.0, progress=False, coords=None, project=False):
     """Guided diffusion reconstruction of `hf_norm` degraded at `ratio`.
 
     `coords` (B,H,W,d) is required for a geo-conditioned model and ignored
-    otherwise.
+    otherwise. With project=True the sampler enforces coarsen(x0) == LF at
+    every step (data consistency); the LF observation is the same coarse field
+    the guidance is built from.
     """
     x_g = degrade(hf_norm, ratio, smooth_sigma=recon_cfg.get("smooth_sigma", 0.0))
+    lf = coarsen(hf_norm, ratio) if project else None
     return diffusion.guided_reconstruct(
         model, x_g, t_steps=recon_cfg["t_steps"], K=recon_cfg["K"], eta=eta,
-        progress=progress, cond=coords,
+        progress=progress, cond=coords, project=project, lf=lf, ratio=ratio,
     )
 
 

@@ -59,6 +59,27 @@ def spectrum_log_l1(pred, truth) -> float:
     return float(np.mean(np.abs(np.log10(ep[1:] + eps) - np.log10(et[1:] + eps))))
 
 
+def crps_ensemble(members, truth) -> float:
+    """Fair empirical-ensemble CRPS, averaged over samples and pixels.
+
+    CRPS = mean_i |x_i - y| - (1 / (2 M (M-1))) sum_{i != j} |x_i - x_j|
+
+    Args:
+        members: sequence of M predictions, each (N, H, W)-like.
+        truth: (N, H, W)-like reference.
+    """
+    p = np.stack([_to_numpy(m) for m in members])  # (M, N, H, W)
+    t = _to_numpy(truth)[None]
+    m = p.shape[0]
+    assert m >= 2, "CRPS needs at least 2 ensemble members"
+    term1 = np.abs(p - t).mean()
+    spread = 0.0
+    for i in range(m):
+        for j in range(i + 1, m):
+            spread += np.abs(p[i] - p[j]).mean()
+    return float(term1 - spread / (m * (m - 1)))
+
+
 def value_histogram(fields, bins=100, value_range=None):
     """Normalized histogram (density) of field values."""
     f = _to_numpy(fields).ravel()

@@ -60,6 +60,8 @@ def main():
                     help="Enable wandb logging (overrides config wandb.enabled).")
     ap.add_argument("--ckpt", default="diffusion.pt",
                     help="diffusion checkpoint name (e.g. diffusion_geo.pt)")
+    ap.add_argument("--project", action="store_true",
+                    help="Per-step data-consistency projection during sampling.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -118,10 +120,12 @@ def main():
 
         if geo_on:
             diff = _batched(
-                lambda b, c: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta, coords=c),
+                lambda b, c: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta,
+                                                   coords=c, project=args.project),
                 hf, args.batch, extra=coords)
         else:
-            diff = _batched(lambda b: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta),
+            diff = _batched(lambda b: reconstruct_diffusion(diffusion, model, b, ratio, rc,
+                                                            eta=eta, project=args.project),
                             hf, args.batch)
         bic = _batched(lambda b: reconstruct_bicubic(b, ratio), hf, args.batch)
         preds = {"Diffusion": diff, "Bicubic": bic}

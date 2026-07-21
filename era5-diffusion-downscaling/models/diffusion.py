@@ -87,8 +87,18 @@ class GaussianDiffusion(nn.Module):
         stride: int = 1,
         progress: bool = False,
         cond=None,
+        project: bool = False,
+        lf: torch.Tensor = None,
+        ratio: int = None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
+
+        With project=True (requires `lf`, the (N,1,h,w) coarse observation, and
+        `ratio`), every step's x0 estimate is projected onto the constraint
+        coarsen(x0) == lf: the model keeps its invented fine scales but the
+        block averages are pinned to the observed input (ILVR-style data
+        consistency). Without it the input is consulted only once, at the
+        noise-mixing initialization, and the chain is free to drift.
 
         Args:
             model: trained noise predictor eps_theta(x_t, t).
@@ -106,6 +116,10 @@ class GaussianDiffusion(nn.Module):
             (N, 1, H, W) reconstructed field (normalized units).
         """
         assert len(t_steps) == K, "t_steps must have one entry per outer loop K"
+        if project:
+            assert lf is not None and ratio is not None, "project=True needs lf and ratio"
+            from data.degrade import coarsen, upsample_nearest
+            hw = x_guidance.shape[-2:]
         x_g = x_guidance
         device = x_guidance.device
         iterator = range(K)
@@ -135,6 +149,8 @@ class GaussianDiffusion(nn.Module):
                 eps_theta = model(x, t_batch) if cond is None else model(x, t_batch, cond)
 
                 x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
+                if project:
+                    x0_pred = x0_pred + upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
                 sigma = eta * (
                     ((1 - a_prev) / (1 - a_i)).clamp(min=0).sqrt()
                     * (1 - a_i / a_prev).clamp(min=0).sqrt()
