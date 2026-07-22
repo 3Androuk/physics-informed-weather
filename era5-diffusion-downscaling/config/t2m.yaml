@@ -59,6 +59,12 @@ geo:
   finest_resolution: 128
   altitude: null
 
+# Split-model Phase A: conditional diffusion on the residual HF - bicubic,
+# ratio randomized per batch; test at a held-out ratio (6) for generalization.
+residual:
+  train_ratios: [2, 4, 8]
+  n_steps: 100                     # DDIM steps when sampling the residual
+
 train:
   batch_size: 16
   epochs: 200

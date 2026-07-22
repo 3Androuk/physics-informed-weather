@@ -31,8 +31,9 @@ from data.degrade import degrade  # noqa: E402
 from eval.metrics import (l2_norm, radial_power_spectrum,  # noqa: E402
                           spectrum_log_l1, value_histogram)
 from sample.reconstruct import (load_diffusion, load_directmap,  # noqa: E402
-                                reconstruct_bicubic, reconstruct_diffusion,
-                                reconstruct_directmap)
+                                load_residual, reconstruct_bicubic,
+                                reconstruct_diffusion, reconstruct_directmap,
+                                reconstruct_residual)
 from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
 
 
@@ -64,6 +65,9 @@ def main():
                     help="Per-step data-consistency projection during sampling.")
     ap.add_argument("--dm-ckpt", default="directmap.pt",
                     help="direct-map checkpoint name (e.g. directmap_geo.pt)")
+    ap.add_argument("--res-ckpt", default=None,
+                    help="residual-diffusion checkpoint name (e.g. residual_geo.pt); "
+                         "adds a 'Residual' method column when given.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -85,10 +89,16 @@ def main():
         dm_model, dm_cfg = load_directmap(ckpt_dir / args.dm_ckpt, device)
         dm_geo = dm_cfg.get("geo", {}).get("enabled", False)
 
-    # Test patches (+ per-pixel coords if either model is geo-conditioned).
+    res_model, res_geo = None, False
+    if args.res_ckpt is not None:
+        res_model, res_diff, res_cfg, res_std = load_residual(ckpt_dir / args.res_ckpt, device)
+        res_geo = res_cfg.get("geo", {}).get("enabled", False)
+        res_steps = res_cfg.get("residual", {}).get("n_steps", 100)
+
+    # Test patches (+ per-pixel coords if any model is geo-conditioned).
     coords = None
-    if geo_on or dm_geo:
-        g = (cfg_ck if geo_on else dm_cfg)["geo"]
+    if geo_on or dm_geo or res_geo:
+        g = (cfg_ck if geo_on else (dm_cfg if dm_geo else res_cfg))["geo"]
         ds = PatchDataset(
             patch_dir / "test_patches.npy", normalizer,
             origins_path=patch_dir / "test_origins.npy",
@@ -132,6 +142,19 @@ def main():
                             hf, args.batch)
         bic = _batched(lambda b: reconstruct_bicubic(b, ratio), hf, args.batch)
         preds = {"Diffusion": diff, "Bicubic": bic}
+        if res_model is not None:
+            if res_geo:
+                preds["Residual"] = _batched(
+                    lambda b, c: reconstruct_residual(res_diff, res_model, b, ratio,
+                                                      res_std, n_steps=res_steps,
+                                                      coords=c, project=args.project),
+                    hf, args.batch, extra=coords)
+            else:
+                preds["Residual"] = _batched(
+                    lambda b: reconstruct_residual(res_diff, res_model, b, ratio,
+                                                   res_std, n_steps=res_steps,
+                                                   project=args.project),
+                    hf, args.batch)
         if dm_model is not None:
             if dm_geo:
                 preds["Direct map"] = _batched(

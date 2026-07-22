@@ -34,6 +34,40 @@ def load_diffusion(ckpt_path, device, use_ema=True):
     return model, diffusion, cfg
 
 
+def load_residual(ckpt_path, device, use_ema=True):
+    """Load a conditional residual diffusion checkpoint.
+
+    Returns (model, diffusion, cfg, res_std)."""
+    ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg = ck["config"]
+    from models.residual import build_residual_model
+    model = build_residual_model(cfg)
+    model.load_state_dict(ck["ema"] if (use_ema and "ema" in ck) else ck["model"])
+    model.eval().to(device)
+    diffusion = build_diffusion(cfg).to(device)
+    return model, diffusion, cfg, ck["res_std"]
+
+
+@torch.no_grad()
+def reconstruct_residual(diffusion, model, hf_norm, ratio, res_std,
+                         n_steps=100, coords=None, project=False):
+    """Split-model reconstruction: bicubic mean + sampled residual.
+
+    `coords` is required for a geo-conditioned residual model. project=True
+    applies the exact DDNM projection to the composed output as a final
+    consistency guarantee (cheap; the model is already trained conditionally)."""
+    h, w = hf_norm.shape[-2:]
+    lo = coarsen(hf_norm, ratio)
+    mean_f = F.interpolate(lo, size=(h, w), mode="bicubic", align_corners=False)
+    res = diffusion.sample_unconditional(model, hf_norm.shape, hf_norm.device,
+                                         n_steps=n_steps, cond=(mean_f, coords))
+    out = mean_f + res_std * res
+    if project:
+        from data.degrade import upsample_nearest
+        out = out + upsample_nearest(lo - coarsen(out, ratio), (h, w))
+    return out
+
+
 def load_directmap(ckpt_path, device):
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
