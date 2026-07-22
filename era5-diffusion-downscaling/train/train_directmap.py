@@ -11,6 +11,7 @@ Run:
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -91,9 +92,13 @@ def main():
     # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
     # a multiple of log_every, and resetting per epoch both drops the tail
     # batches and makes the next log divide a partial sum by the full window.
-    running, running_n = 0.0, 0
+    running, running_n, grad_sum = 0.0, 0, 0.0
+    t_last_log = time.time()
     for epoch in range(start_epoch, dc["epochs"] + 1):
         model.train()
+        epoch_start = time.time()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         for y in loader:  # y: normalized HF target
             y = y.to(device, non_blocking=True)
             # Low-fidelity input: degrade in normalized space (equivalent up to
@@ -103,22 +108,39 @@ def main():
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss = loss_fn(model(x), y)
             scaler.scale(loss).backward()
-            if dc["grad_clip"] > 0:
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), dc["grad_clip"])
+            scaler.unscale_(opt)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                dc["grad_clip"] if dc["grad_clip"] > 0 else float("inf"))
             scaler.step(opt)
             scaler.update()
             running += loss.item()
             running_n += 1
+            grad_sum += grad_norm.item()
             step += 1
             if step % cfg["train"]["log_every"] == 0:
-                avg = running / running_n
-                print(f"epoch {epoch:03d} step {step:07d} | mse {avg:.5f}")
-                running, running_n = 0.0, 0
+                now = time.time()
+                metrics = {
+                    "train/mse": running / running_n,
+                    "train/grad_norm": grad_sum / running_n,
+                    "train/imgs_per_sec": running_n * y.shape[0] / (now - t_last_log),
+                    "epoch": epoch,
+                }
+                print(f"epoch {epoch:03d} step {step:07d} | "
+                      f"mse {metrics['train/mse']:.5f} | "
+                      f"grad {metrics['train/grad_norm']:.3f} | "
+                      f"{metrics['train/imgs_per_sec']:.1f} img/s")
+                running, running_n, grad_sum = 0.0, 0, 0.0
+                t_last_log = now
                 if wb_run is not None:
-                    wb_run.log({"train/mse": avg, "epoch": epoch}, step=step)
+                    wb_run.log(metrics, step=step)
 
         # ── Per-epoch val MSE at train ratio and at 8x (OOD gap) ──────────
+        epoch_metrics = {"train/epoch_time_s": time.time() - epoch_start, "epoch": epoch}
+        if device.type == "cuda":
+            epoch_metrics["train/gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30
+        if wb_run is not None:
+            wb_run.log(epoch_metrics, step=step)
         if val_x is not None:
             model.eval()
             metrics = {"epoch": epoch}
@@ -131,9 +153,11 @@ def main():
                         n += y.shape[0]
                     metrics[key] = total / max(n, 1)
             print(f"epoch {epoch:03d} done | val {ratio}x {metrics[f'val/mse_{ratio}x']:.5f} "
-                  f"| val 8x {metrics['val/mse_8x']:.5f}")
+                  f"| val 8x {metrics['val/mse_8x']:.5f} | "
+                  f"{epoch_metrics['train/epoch_time_s']:.0f}s")
             if wb_run is not None:
                 wb_run.log(metrics, step=step)
+        t_last_log = time.time()  # exclude val time from throughput
 
         # ── Atomic per-epoch checkpoint (a crash loses at most one epoch) ─
         tmp = ckpt_path.with_suffix(".pt.tmp")
