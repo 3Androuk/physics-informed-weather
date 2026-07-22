@@ -159,6 +159,14 @@ def main():
                 wb_run.log(metrics, step=step)
         t_last_log = time.time()  # exclude val time from throughput
 
+        # ── Periodic reconstruction panels on fixed val patches ───────────
+        if (val_x is not None and wb_run is not None
+                and epoch % cfg["train"].get("sample_every_epochs", 10) == 0):
+            fig_path = ensure_dir(cfg["paths"]["results_dir"]) / f"directmap_epoch{epoch:03d}.png"
+            _save_recons(model, val_x[:2], normalizer, device, ratio, fig_path)
+            import wandb as _wandb
+            wb_run.log({"recons": _wandb.Image(str(fig_path))}, step=step)
+
         # ── Atomic per-epoch checkpoint (a crash loses at most one epoch) ─
         tmp = ckpt_path.with_suffix(".pt.tmp")
         torch.save({
@@ -172,6 +180,44 @@ def main():
     if wb_run is not None:
         wb_run.finish()
     print(f"Done. Checkpoint -> {ckpt_path}")
+
+
+@torch.no_grad()
+def _save_recons(model, val_batch, normalizer, device, ratio, path):
+    """Fixed val patches: input (train ratio), prediction at train ratio and at
+    8x, target — all on the target's color scale, comparable across epochs."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    was_training = model.training
+    model.eval()
+    y = val_batch.to(device)
+    panels = []
+    for i in range(len(y)):
+        yi = y[i:i + 1]
+        x4 = degrade(yi, ratio)
+        panels.append([
+            ("Input (LF)", x4), (f"Pred {ratio}x", model(x4)),
+            ("Pred 8x", model(degrade(yi, 8))), ("Target", yi),
+        ])
+    fig, axes = plt.subplots(len(panels), 4, figsize=(16, 4 * len(panels)))
+    axes = axes.reshape(len(panels), 4)
+    for r, row in enumerate(panels):
+        ref = normalizer.decode(row[-1][1].cpu())[0, 0].numpy()
+        vmin, vmax = float(ref.min()), float(ref.max())
+        for ax, (title, t) in zip(axes[r], row):
+            ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
+                      vmin=vmin, vmax=vmax)
+            ax.set_title(title)
+            ax.axis("off")
+    fig.suptitle("Direct-map reconstructions (fixed val patches)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    if was_training:
+        model.train()
+    print(f"  saved recons -> {path}")
 
 
 if __name__ == "__main__":
