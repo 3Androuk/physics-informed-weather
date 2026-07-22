@@ -37,7 +37,13 @@ def load_diffusion(ckpt_path, device, use_ema=True):
 def load_directmap(ckpt_path, device):
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
-    model = build_unet(cfg, use_time=False)
+    if cfg.get("geo", {}).get("enabled", False):
+        from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
+        geo_enc = build_geo_encoder(cfg)
+        base = build_unet(cfg, use_time=False, extra_in_channels=geo_enc.output_dim)
+        model = GeoConditionedUNet(base, geo_enc)
+    else:
+        model = build_unet(cfg, use_time=False)
     model.load_state_dict(ck["model"])
     model.eval().to(device)
     return model, cfg
@@ -70,10 +76,12 @@ def reconstruct_bicubic(hf_norm, ratio):
 
 
 @torch.no_grad()
-def reconstruct_directmap(model, hf_norm, ratio, smooth_sigma=0.0):
-    """Direct-mapping baseline f(X) on a (possibly OOD) ratio."""
+def reconstruct_directmap(model, hf_norm, ratio, smooth_sigma=0.0, coords=None):
+    """Direct-mapping baseline f(X) on a (possibly OOD) ratio.
+
+    `coords` (B,H,W,d) is required for a geo-conditioned direct map."""
     x = degrade(hf_norm, ratio, smooth_sigma=smooth_sigma)
-    return model(x)
+    return model(x, None, coords) if coords is not None else model(x)
 
 
 def _cli():

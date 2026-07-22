@@ -62,6 +62,8 @@ def main():
                     help="diffusion checkpoint name (e.g. diffusion_geo.pt)")
     ap.add_argument("--project", action="store_true",
                     help="Per-step data-consistency projection during sampling.")
+    ap.add_argument("--dm-ckpt", default="directmap.pt",
+                    help="direct-map checkpoint name (e.g. directmap_geo.pt)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -78,10 +80,15 @@ def main():
     model, diffusion, cfg_ck = load_diffusion(ckpt_dir / args.ckpt, device)
     geo_on = cfg_ck.get("geo", {}).get("enabled", False)
 
-    # Test patches (+ per-pixel coords if the diffusion model is geo-conditioned).
+    dm_model, dm_geo = None, False
+    if (ckpt_dir / args.dm_ckpt).exists():
+        dm_model, dm_cfg = load_directmap(ckpt_dir / args.dm_ckpt, device)
+        dm_geo = dm_cfg.get("geo", {}).get("enabled", False)
+
+    # Test patches (+ per-pixel coords if either model is geo-conditioned).
     coords = None
-    if geo_on:
-        g = cfg_ck["geo"]
+    if geo_on or dm_geo:
+        g = (cfg_ck if geo_on else dm_cfg)["geo"]
         ds = PatchDataset(
             patch_dir / "test_patches.npy", normalizer,
             origins_path=patch_dir / "test_origins.npy",
@@ -95,11 +102,7 @@ def main():
         ds = PatchDataset(patch_dir / "test_patches.npy", normalizer)
         hf = torch.stack([ds[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())                          # physical units
-    print(f"Evaluating on {n} test patches | geo={geo_on}")
-
-    dm_model = None
-    if (ckpt_dir / "directmap.pt").exists():
-        dm_model, _ = load_directmap(ckpt_dir / "directmap.pt", device)
+    print(f"Evaluating on {n} test patches | geo={geo_on} | dm_geo={dm_geo}")
 
     eta = cfg["sample"]["ddim_eta"]
     table = {}
@@ -130,9 +133,15 @@ def main():
         bic = _batched(lambda b: reconstruct_bicubic(b, ratio), hf, args.batch)
         preds = {"Diffusion": diff, "Bicubic": bic}
         if dm_model is not None:
-            preds["Direct map"] = _batched(
-                lambda b: reconstruct_directmap(dm_model, b, ratio, rc.get("smooth_sigma", 0.0)),
-                hf, args.batch)
+            if dm_geo:
+                preds["Direct map"] = _batched(
+                    lambda b, c: reconstruct_directmap(
+                        dm_model, b, ratio, rc.get("smooth_sigma", 0.0), coords=c),
+                    hf, args.batch, extra=coords)
+            else:
+                preds["Direct map"] = _batched(
+                    lambda b: reconstruct_directmap(dm_model, b, ratio, rc.get("smooth_sigma", 0.0)),
+                    hf, args.batch)
 
         row = {}
         for name, p in preds.items():
