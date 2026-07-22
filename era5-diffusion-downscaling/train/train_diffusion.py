@@ -35,12 +35,18 @@ def main():
     ap.add_argument("--geo", action="store_true",
                     help="Force geo.enabled: true (overrides config), so baseline "
                          "and geo runs can be chained without editing the config.")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Override config seed for replicate runs; the checkpoint "
+                         "name gets an _s<seed> suffix so replicates don't "
+                         "overwrite the primary run.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
         cfg.setdefault("wandb", {})["enabled"] = True
     if args.geo:
         cfg.setdefault("geo", {})["enabled"] = True
+    if args.seed is not None:
+        cfg["seed"] = args.seed
     set_seed(cfg["seed"])
     device = get_device()
 
@@ -50,7 +56,8 @@ def main():
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
 
     geo_on = cfg.get("geo", {}).get("enabled", False)
-    ckpt_name = "diffusion_geo.pt" if geo_on else "diffusion.pt"
+    seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
+    ckpt_name = f"diffusion{'_geo' if geo_on else ''}{seed_suffix}.pt"
 
     normalizer = load_norm_stats(patch_dir)
     if geo_on:
