@@ -10,6 +10,7 @@ Run:
 """
 
 import argparse
+import random
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,12 @@ def main():
     ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
+    ap.add_argument("--random-ratio", action="store_true",
+                    help="Ratio-randomized REGRESSION MEAN for the split model "
+                         "(samples residual.train_ratios per batch; checkpoint "
+                         "becomes meanmap*.pt). The plain direct map stays "
+                         "fixed-ratio by design — this mode is a different role, "
+                         "not a replacement.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -51,6 +58,8 @@ def main():
 
     dc = cfg["directmap"]
     ratio = dc["train_ratio"]
+    train_ratios = (cfg.get("residual", {}).get("train_ratios", [2, 4, 8])
+                    if args.random_ratio else None)
     patch_dir = Path(cfg["paths"]["patch_dir"])
     ckpt_dir = ensure_dir(cfg["paths"]["ckpt_dir"])
 
@@ -69,7 +78,9 @@ def main():
         num_workers=cfg["train"]["num_workers"], pin_memory=True, drop_last=True,
         persistent_workers=cfg["train"]["num_workers"] > 0,
     )
-    print(f"Direct-map baseline | train ratio {ratio}x | patches {len(ds)} | geo={geo_on}")
+    mode = f"ratios {train_ratios} (mean mode)" if train_ratios else f"train ratio {ratio}x"
+    print(f"{'Regression mean' if train_ratios else 'Direct-map baseline'} | {mode} "
+          f"| patches {len(ds)} | geo={geo_on}")
 
     # Held-out patches for per-epoch val MSE at the training ratio AND at 8x:
     # the in-distribution/out-of-distribution gap is the brittleness story as
@@ -113,7 +124,8 @@ def main():
 
     start_epoch, step = 1, 0
     hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
-    ckpt_path = ckpt_dir / f"directmap{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}.pt"
+    stem = "meanmap" if args.random_ratio else "directmap"
+    ckpt_path = ckpt_dir / f"{stem}{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}.pt"
     if args.resume and ckpt_path.exists():
         ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
@@ -145,8 +157,9 @@ def main():
             else:
                 y, coords = batch.to(device, non_blocking=True), None
             # Low-fidelity input: degrade in normalized space (equivalent up to
-            # the affine z-score), produced ONLY at the training ratio.
-            x = degrade(y, ratio)
+            # the affine z-score). Fixed ratio for the baseline; randomized per
+            # batch in --random-ratio (mean) mode.
+            x = degrade(y, random.choice(train_ratios) if train_ratios else ratio)
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss = loss_fn(fwd(x, coords), y)
@@ -218,7 +231,8 @@ def main():
         tmp = ckpt_path.with_suffix(".pt.tmp")
         torch.save({
             "model": model.state_dict(), "opt": opt.state_dict(),
-            "scaler": scaler.state_dict(), "config": cfg, "train_ratio": ratio,
+            "scaler": scaler.state_dict(), "config": cfg,
+            "train_ratio": train_ratios if train_ratios else ratio,
             "norm_mean": normalizer.mean, "norm_std": normalizer.std,
             "epoch": epoch, "step": step,
         }, tmp)

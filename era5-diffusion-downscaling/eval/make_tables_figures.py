@@ -96,15 +96,16 @@ def main():
         dm_model, dm_cfg = load_directmap(ckpt_dir / args.dm_ckpt, device)
         dm_geo = dm_cfg.get("geo", {}).get("enabled", False)
 
-    res_model, res_geo = None, False
+    res_model, res_geo, res_mean_geo = None, False, False
     if args.res_ckpt is not None:
-        res_model, res_diff, res_cfg, res_std = load_residual(ckpt_dir / args.res_ckpt, device)
+        (res_model, res_diff, res_cfg, res_std,
+         res_mean, res_mean_geo) = load_residual(ckpt_dir / args.res_ckpt, device)
         res_geo = res_cfg.get("geo", {}).get("enabled", False)
         res_steps = res_cfg.get("residual", {}).get("n_steps", 100)
 
     # Test patches (+ per-pixel coords if any model is geo-conditioned).
     coords = None
-    if geo_on or dm_geo or res_geo:
+    if geo_on or dm_geo or res_geo or res_mean_geo:
         g = (cfg_ck if geo_on else (dm_cfg if dm_geo else res_cfg))["geo"]
         ds = PatchDataset(
             patch_dir / "test_patches.npy", normalizer,
@@ -151,17 +152,20 @@ def main():
         bic = _batched(lambda b: reconstruct_bicubic(b, ratio), hf, args.batch)
         preds = {"Diffusion": diff, "Bicubic": bic}
         if res_model is not None:
-            if res_geo:
+            if res_geo or res_mean_geo:
                 preds["Residual"] = _batched(
                     lambda b, c: reconstruct_residual(res_diff, res_model, b, ratio,
                                                       res_std, n_steps=res_steps,
-                                                      coords=c, project=args.project),
+                                                      coords=c, project=args.project,
+                                                      mean_model=res_mean,
+                                                      mean_geo=res_mean_geo),
                     hf, args.batch, extra=coords, label=f"{tag} Residual")
             else:
                 preds["Residual"] = _batched(
                     lambda b: reconstruct_residual(res_diff, res_model, b, ratio,
                                                    res_std, n_steps=res_steps,
-                                                   project=args.project),
+                                                   project=args.project,
+                                                   mean_model=res_mean),
                     hf, args.batch, label=f"{tag} Residual")
         if dm_model is not None:
             if dm_geo:

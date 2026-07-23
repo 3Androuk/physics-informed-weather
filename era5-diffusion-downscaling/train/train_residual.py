@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
-from data.degrade import coarsen  # noqa: E402
+from data.degrade import coarsen, degrade as degrade_nearest  # noqa: E402
 from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.residual import build_residual_model  # noqa: E402
@@ -30,7 +30,7 @@ from train.ema import EMA  # noqa: E402
 from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
 
 
-def _mean_field(y: torch.Tensor, ratio: int) -> torch.Tensor:
+def _bicubic_mean(y: torch.Tensor, ratio: int) -> torch.Tensor:
     """Phase-A deterministic mean: bicubic upsample of the coarse field."""
     lo = coarsen(y, ratio)
     return F.interpolate(lo, size=y.shape[-2:], mode="bicubic", align_corners=False)
@@ -51,6 +51,11 @@ def main():
     ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
+    ap.add_argument("--mean-ckpt", default=None,
+                    help="Checkpoint name (in paths.ckpt_dir) of a frozen learned "
+                         "regression mean (train_directmap --random-ratio -> "
+                         "meanmap*.pt) to use instead of bicubic; the residual "
+                         "checkpoint gets an _lm suffix and remembers the mean.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -74,12 +79,40 @@ def main():
     geo_on = cfg.get("geo", {}).get("enabled", False)
     seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
     hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
-    ckpt_name = f"residual{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{seed_suffix}.pt"
+    lm = "_lm" if args.mean_ckpt else ""
+    ckpt_name = f"residual{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{lm}{seed_suffix}.pt"
+
+    # ── The deterministic mean: bicubic (Phase A) or a frozen learned
+    # regression (Phase B, --mean-ckpt). The mean may be geo-conditioned even
+    # when the residual model is not, in which case coords are still needed.
+    device_early = device
+    mean_geo = False
+    if args.mean_ckpt:
+        from sample.reconstruct import load_directmap
+        mean_model, mean_cfg = load_directmap(ckpt_dir / args.mean_ckpt, device_early)
+        for p in mean_model.parameters():
+            p.requires_grad_(False)
+        mean_geo = mean_cfg.get("geo", {}).get("enabled", False)
+        print(f"Learned mean: {args.mean_ckpt} (geo={mean_geo}, frozen)")
+
+        def mean_fn(y, r, coords=None):
+            x = degrade_nearest(y, r)
+            with torch.no_grad():
+                return mean_model(x, None, coords) if mean_geo else mean_model(x)
+    else:
+        def mean_fn(y, r, coords=None):
+            return _bicubic_mean(y, r)
+
+    need_coords = geo_on or mean_geo
+    if args.mean_ckpt and mean_geo and geo_on:
+        assert (mean_cfg["geo"].get("encoder", "hash")
+                == cfg["geo"].get("encoder", "hash")), \
+            "mean and residual geo encoders must match (they share one coords payload)"
 
     normalizer = load_norm_stats(patch_dir)
     gkw = {}
-    if geo_on:
-        gcfg = cfg["geo"]
+    if need_coords:
+        gcfg = (cfg if geo_on else mean_cfg)["geo"]
         gkw = dict(origins_path=patch_dir / "train_origins.npy",
                    coords_full_path=patch_dir / "coords_full.npz",
                    geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
@@ -92,15 +125,22 @@ def main():
     )
     print(f"Residual diffusion | ratios {ratios} | patches {len(ds)} | geo={geo_on}")
 
-    # ── Residual normalization: one scalar std over ratios (estimated once).
-    # The mean-field channel tells the model which regime it is in, so a
-    # shared scale is sufficient; the value is stored in the checkpoint.
+    # ── Residual normalization: one scalar std over ratios (estimated once
+    # against the ACTUAL mean in use). The mean-field channel tells the model
+    # which regime it is in, so a shared scale is sufficient; the value is
+    # stored in the checkpoint.
     with torch.no_grad():
         chunks = []
+        items = [ds[i] for i in range(64)]
+        if need_coords:
+            y64 = torch.stack([it[0] for it in items]).to(device)
+            c64 = torch.stack([it[1] for it in items]).to(device)
+        else:
+            y64, c64 = torch.stack(items).to(device), None
         for r in ratios:
-            y = torch.stack([ds[i][0] if geo_on else ds[i] for i in range(64)])
-            chunks.append((y - _mean_field(y, r)).flatten())
+            chunks.append((y64 - mean_fn(y64, r, c64)).flatten().cpu())
         res_std = float(torch.cat(chunks).std())
+        del y64, c64
     print(f"Residual std (normalized units): {res_std:.4f}")
 
     # ── Val: fixed-RNG residual noise-prediction loss at the middle ratio.
@@ -108,7 +148,7 @@ def main():
     test_path = patch_dir / "test_patches.npy"
     if test_path.exists():
         vkw = dict(gkw)
-        if geo_on:
+        if need_coords:
             vkw["origins_path"] = patch_dir / "test_origins.npy"
         val_ds = PatchDataset(test_path, normalizer, **vkw)
         n_val = min(int(tc.get("val_patches", 256)), len(val_ds))
@@ -158,14 +198,14 @@ def main():
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
         for batch in loader:
-            if geo_on:
+            if need_coords:
                 y, coords = batch
                 y = y.to(device, non_blocking=True)
                 coords = coords.to(device, non_blocking=True)
             else:
                 y, coords = batch.to(device, non_blocking=True), None
             ratio = random.choice(ratios)
-            mean_f = _mean_field(y, ratio)
+            mean_f = mean_fn(y, ratio, coords)
             x0 = (y - mean_f) / res_std
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
@@ -211,7 +251,8 @@ def main():
             epoch_metrics["train/gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30
         if val_loader is not None:
             epoch_metrics["val/loss"] = _val_loss(
-                diffusion, ema.shadow, val_loader, device, val_ratio, res_std, geo_on)
+                diffusion, ema.shadow, val_loader, device, val_ratio, res_std,
+                need_coords, mean_fn)
             print(f"epoch {epoch:03d} done | val loss {epoch_metrics['val/loss']:.5f} | "
                   f"{epoch_metrics['train/epoch_time_s']:.0f}s")
         if wb_run is not None:
@@ -221,8 +262,8 @@ def main():
         if epoch % tc["sample_every_epochs"] == 0 and val_loader is not None:
             fig_path = results_dir / f"residual_epoch{epoch:03d}.png"
             spec = _save_recons(diffusion, ema.shadow, val_loader.dataset, normalizer,
-                                device, res_std, rcfg.get("n_steps", 100), geo_on,
-                                fig_path)
+                                device, res_std, rcfg.get("n_steps", 100), need_coords,
+                                mean_fn, fig_path)
             if wb_run is not None:
                 log = {"recons": wandb.Image(str(fig_path))}
                 if spec is not None:
@@ -238,7 +279,7 @@ def main():
             torch.save({
                 "model": model.state_dict(), "ema": ema.state_dict(),
                 "opt": opt.state_dict(), "scaler": scaler.state_dict(),
-                "config": cfg, "res_std": res_std,
+                "config": cfg, "res_std": res_std, "mean_ckpt": args.mean_ckpt,
                 "norm_mean": normalizer.mean, "norm_std": normalizer.std,
                 "epoch": epoch, "step": step,
             }, tmp)
@@ -255,7 +296,7 @@ def _weights_finite(model) -> bool:
 
 
 @torch.no_grad()
-def _val_loss(diffusion, model, val_loader, device, ratio, res_std, geo_on):
+def _val_loss(diffusion, model, val_loader, device, ratio, res_std, need_coords, mean_fn):
     """Fixed-RNG residual noise-prediction loss at one ratio (comparable
     across epochs)."""
     was_training = model.training
@@ -267,13 +308,13 @@ def _val_loss(diffusion, model, val_loader, device, ratio, res_std, geo_on):
         if device.type == "cuda":
             torch.cuda.manual_seed_all(0)
         for batch in val_loader:
-            if geo_on:
+            if need_coords:
                 y, coords = batch
                 y = y.to(device, non_blocking=True)
                 coords = coords.to(device, non_blocking=True)
             else:
                 y, coords = batch.to(device, non_blocking=True), None
-            mean_f = _mean_field(y, ratio)
+            mean_f = mean_fn(y, ratio, coords)
             x0 = (y - mean_f) / res_std
             loss = diffusion.training_loss(model, x0, cond=(mean_f, coords))
             total += loss.item() * y.shape[0]
@@ -285,7 +326,7 @@ def _val_loss(diffusion, model, val_loader, device, ratio, res_std, geo_on):
 
 @torch.no_grad()
 def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
-                 n_steps, geo_on, path):
+                 n_steps, need_coords, mean_fn, path):
     """2 fixed val patches reconstructed at 4x and 8x: mean | mean+residual |
     target, shared color scale. Returns spectrum_log_l1 of the recons vs
     targets (both ratios pooled) or None."""
@@ -294,7 +335,7 @@ def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
     import matplotlib.pyplot as plt
 
     items = [val_subset[i] for i in range(2)]
-    if geo_on:
+    if need_coords:
         y = torch.stack([it[0] for it in items]).to(device)
         coords = torch.stack([it[1] for it in items]).to(device)
     else:
@@ -307,7 +348,7 @@ def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
         ci = None if coords is None else coords[i:i + 1]
         row = []
         for r in (4, 8):
-            mean_f = _mean_field(yi, r)
+            mean_f = mean_fn(yi, r, ci)
             res = diffusion.sample_unconditional(
                 model, yi.shape, device, n_steps=n_steps, cond=(mean_f, ci))
             rec = mean_f + res_std * res

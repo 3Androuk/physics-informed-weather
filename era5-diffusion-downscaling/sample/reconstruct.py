@@ -37,7 +37,10 @@ def load_diffusion(ckpt_path, device, use_ema=True):
 def load_residual(ckpt_path, device, use_ema=True):
     """Load a conditional residual diffusion checkpoint.
 
-    Returns (model, diffusion, cfg, res_std)."""
+    Returns (model, diffusion, cfg, res_std, mean_model, mean_geo) — the last
+    two are the frozen learned mean (or None/False for the bicubic mean),
+    reloaded from the mean checkpoint name stored at training time."""
+    ckpt_path = Path(ckpt_path)
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
     from models.residual import build_residual_model
@@ -45,20 +48,31 @@ def load_residual(ckpt_path, device, use_ema=True):
     model.load_state_dict(ck["ema"] if (use_ema and "ema" in ck) else ck["model"])
     model.eval().to(device)
     diffusion = build_diffusion(cfg).to(device)
-    return model, diffusion, cfg, ck["res_std"]
+    mean_model, mean_geo = None, False
+    if ck.get("mean_ckpt"):
+        mean_model, mean_cfg = load_directmap(ckpt_path.parent / ck["mean_ckpt"], device)
+        mean_geo = mean_cfg.get("geo", {}).get("enabled", False)
+    return model, diffusion, cfg, ck["res_std"], mean_model, mean_geo
 
 
 @torch.no_grad()
 def reconstruct_residual(diffusion, model, hf_norm, ratio, res_std,
-                         n_steps=100, coords=None, project=False):
-    """Split-model reconstruction: bicubic mean + sampled residual.
+                         n_steps=100, coords=None, project=False,
+                         mean_model=None, mean_geo=False):
+    """Split-model reconstruction: deterministic mean + sampled residual.
 
-    `coords` is required for a geo-conditioned residual model. project=True
-    applies the exact DDNM projection to the composed output as a final
-    consistency guarantee (cheap; the model is already trained conditionally)."""
+    Mean = bicubic upsample by default, or a frozen learned regression when
+    `mean_model` is given (coords required if it is geo-conditioned).
+    `coords` is also required for a geo-conditioned residual model.
+    project=True applies the exact DDNM projection to the composed output as a
+    final consistency guarantee."""
     h, w = hf_norm.shape[-2:]
     lo = coarsen(hf_norm, ratio)
-    mean_f = F.interpolate(lo, size=(h, w), mode="bicubic", align_corners=False)
+    if mean_model is not None:
+        x_in = degrade(hf_norm, ratio)
+        mean_f = mean_model(x_in, None, coords) if mean_geo else mean_model(x_in)
+    else:
+        mean_f = F.interpolate(lo, size=(h, w), mode="bicubic", align_corners=False)
     res = diffusion.sample_unconditional(model, hf_norm.shape, hf_norm.device,
                                          n_steps=n_steps, cond=(mean_f, coords))
     out = mean_f + res_std * res
