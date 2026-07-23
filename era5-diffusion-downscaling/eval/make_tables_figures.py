@@ -38,14 +38,21 @@ from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
 
 
 @torch.no_grad()
-def _batched(fn, hf, batch=16, extra=None):
+def _batched(fn, hf, batch=16, extra=None, label=None):
     """Apply a per-batch reconstruction fn over all test patches.
 
     If `extra` is given (e.g. per-pixel geo coords), it is sliced in lockstep
-    and passed as the second argument to `fn`.
+    and passed as the second argument to `fn`. `label` shows a tqdm bar.
     """
+    it = range(0, len(hf), batch)
+    if label is not None:
+        try:
+            from tqdm import tqdm
+            it = tqdm(it, desc=label)
+        except ImportError:
+            pass
     outs = []
-    for i in range(0, len(hf), batch):
+    for i in it:
         if extra is None:
             outs.append(fn(hf[i:i + batch]).cpu())
         else:
@@ -136,11 +143,11 @@ def main():
             diff = _batched(
                 lambda b, c: reconstruct_diffusion(diffusion, model, b, ratio, rc, eta=eta,
                                                    coords=c, project=args.project),
-                hf, args.batch, extra=coords)
+                hf, args.batch, extra=coords, label=f"{tag} Diffusion")
         else:
             diff = _batched(lambda b: reconstruct_diffusion(diffusion, model, b, ratio, rc,
                                                             eta=eta, project=args.project),
-                            hf, args.batch)
+                            hf, args.batch, label=f"{tag} Diffusion")
         bic = _batched(lambda b: reconstruct_bicubic(b, ratio), hf, args.batch)
         preds = {"Diffusion": diff, "Bicubic": bic}
         if res_model is not None:
@@ -149,23 +156,23 @@ def main():
                     lambda b, c: reconstruct_residual(res_diff, res_model, b, ratio,
                                                       res_std, n_steps=res_steps,
                                                       coords=c, project=args.project),
-                    hf, args.batch, extra=coords)
+                    hf, args.batch, extra=coords, label=f"{tag} Residual")
             else:
                 preds["Residual"] = _batched(
                     lambda b: reconstruct_residual(res_diff, res_model, b, ratio,
                                                    res_std, n_steps=res_steps,
                                                    project=args.project),
-                    hf, args.batch)
+                    hf, args.batch, label=f"{tag} Residual")
         if dm_model is not None:
             if dm_geo:
                 preds["Direct map"] = _batched(
                     lambda b, c: reconstruct_directmap(
                         dm_model, b, ratio, rc.get("smooth_sigma", 0.0), coords=c),
-                    hf, args.batch, extra=coords)
+                    hf, args.batch, extra=coords, label=f"{tag} Direct map")
             else:
                 preds["Direct map"] = _batched(
                     lambda b: reconstruct_directmap(dm_model, b, ratio, rc.get("smooth_sigma", 0.0)),
-                    hf, args.batch)
+                    hf, args.batch, label=f"{tag} Direct map")
 
         row = {}
         for name, p in preds.items():
