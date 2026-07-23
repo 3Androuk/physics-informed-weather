@@ -56,6 +56,7 @@ def _load_test(patch_dir, normalizer, n, geo_cfg, device):
             origins_path=patch_dir / "test_origins.npy",
             coords_full_path=patch_dir / "coords_full.npz",
             geo_input_dim=geo_cfg["input_dim"], altitude=geo_cfg["altitude"],
+            geo_encoder=geo_cfg.get("encoder", "hash"),
         )
         items = [ds[i] for i in range(n)]
         hf = torch.stack([it[0] for it in items]).to(device)

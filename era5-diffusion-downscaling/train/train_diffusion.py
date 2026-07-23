@@ -57,7 +57,8 @@ def main():
 
     geo_on = cfg.get("geo", {}).get("enabled", False)
     seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
-    ckpt_name = f"diffusion{'_geo' if geo_on else ''}{seed_suffix}.pt"
+    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
+    ckpt_name = f"diffusion{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{seed_suffix}.pt"
 
     normalizer = load_norm_stats(patch_dir)
     if geo_on:
@@ -67,6 +68,7 @@ def main():
             origins_path=patch_dir / "train_origins.npy",
             coords_full_path=patch_dir / "coords_full.npz",
             geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
+            geo_encoder=gcfg.get("encoder", "hash"),
         )
     else:
         ds = PatchDataset(patch_dir / "train_patches.npy", normalizer)
@@ -92,6 +94,7 @@ def main():
                 origins_path=patch_dir / "test_origins.npy",
                 coords_full_path=patch_dir / "coords_full.npz",
                 geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
+                geo_encoder=gcfg.get("encoder", "hash"),
             )
         else:
             val_ds = PatchDataset(test_path, normalizer)

@@ -104,6 +104,7 @@ def main():
             origins_path=patch_dir / "test_origins.npy",
             coords_full_path=patch_dir / "coords_full.npz",
             geo_input_dim=g["input_dim"], altitude=g["altitude"],
+            geo_encoder=g.get("encoder", "hash"),
         )
         items = [ds[i] for i in range(n)]
         hf = torch.stack([it[0] for it in items]).to(device)

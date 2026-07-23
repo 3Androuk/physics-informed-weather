@@ -150,6 +150,66 @@ class MultiResHashGrid(nn.Module):
         return out.reshape(*lead, self.output_dim)
 
 
+def healpix_nside_ladder(n_levels: int, nside_min: int = 1, nside_max: int = 128):
+    """Geometric ladder of valid HEALPix Nside values (powers of two).
+
+    Shared by the encoder and data/make_healpix_index.py so the precomputed
+    indices and the tables can never disagree about level resolutions."""
+    exps = np.round(np.linspace(np.log2(nside_min), np.log2(nside_max), n_levels)).astype(int)
+    nsides = [int(2 ** e) for e in exps]
+    assert all(b > a for a, b in zip(nsides, nsides[1:])), (
+        f"non-increasing Nside ladder {nsides}: reduce n_levels or widen the "
+        f"[nside_min, nside_max] range")
+    return nsides
+
+
+class HealpixGrid(nn.Module):
+    """Dense equal-area HEALPix feature pyramid (Gorski et al. 2005).
+
+    Sphere-native alternative to MultiResHashGrid with the same interface and
+    output_dim semantics (tables -> interpolate -> concat, no MLP head). Every
+    level is a DENSE table over the sphere's 12*Nside^2 equal-area cells — no
+    hashing, no collisions, no dense 3D volume wasted on a 2D shell. The 4
+    interpolation neighbors/weights per grid pixel are precomputed once on the
+    full lat/lon grid by data/make_healpix_index.py (the only place healpy is
+    needed); PatchDataset crops them per patch.
+
+    forward(geo) accepts either
+      - the packed float32 payload the dataset emits: (B, L, H, W, 8) =
+        [4 neighbor cell indices | 4 interp weights] — indices are exact in
+        fp32 for Nside <= 1024 (12*1024^2 < 2^24), or
+      - an (idx, w) tuple of (B, L, H, W, 4) tensors.
+    Returns (B, H, W, L*F), same as the hash encoder.
+    """
+
+    def __init__(self, n_levels=8, n_features_per_level=2,
+                 nside_min=1, nside_max=128):
+        super().__init__()
+        self.nsides = healpix_nside_ladder(n_levels, nside_min, nside_max)
+        assert self.nsides[-1] <= 1024, "fp32 index packing requires Nside <= 1024"
+        self.L = n_levels
+        self.F = n_features_per_level
+        self.output_dim = self.L * self.F
+        self.tables = nn.ParameterList(
+            nn.Parameter(torch.empty(12 * ns * ns, self.F).uniform_(-1e-4, 1e-4))
+            for ns in self.nsides
+        )
+
+    def forward(self, geo):
+        if isinstance(geo, (tuple, list)):
+            idx, w = geo
+            idx = idx.long()
+        else:
+            idx, w = geo[..., :4].long(), geo[..., 4:]
+        assert idx.dim() == 5, "expected batched (B, L, H, W, 4) healpix payload"
+        b, _, h, wd, _ = idx.shape
+        outs = []
+        for l in range(self.L):
+            f = self.tables[l][idx[:, l].reshape(-1)].view(b, h, wd, 4, self.F)
+            outs.append((f * w[:, l].unsqueeze(-1)).sum(dim=3))
+        return torch.cat(outs, dim=-1)
+
+
 class GeoConditionedUNet(nn.Module):
     """Wrap a base UNet to consume a per-pixel geographic embedding.
 
@@ -170,8 +230,16 @@ class GeoConditionedUNet(nn.Module):
         return self.unet(torch.cat([x_t, emb], dim=1), t)
 
 
-def build_geo_encoder(cfg: dict) -> MultiResHashGrid:
+def build_geo_encoder(cfg: dict):
+    """Dispatch on cfg['geo'].encoder: 'hash' (default) or 'healpix'."""
     g = cfg["geo"]
+    if g.get("encoder", "hash") == "healpix":
+        return HealpixGrid(
+            n_levels=g["n_levels"],
+            n_features_per_level=g["n_features_per_level"],
+            nside_min=g.get("healpix_nside_min", 1),
+            nside_max=g.get("healpix_nside_max", 128),
+        )
     return MultiResHashGrid(
         input_dim=g["input_dim"],
         n_levels=g["n_levels"],

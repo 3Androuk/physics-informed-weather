@@ -56,7 +56,8 @@ def main():
         gcfg = cfg["geo"]
         gkw = dict(origins_path=patch_dir / "train_origins.npy",
                    coords_full_path=patch_dir / "coords_full.npz",
-                   geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"])
+                   geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
+                   geo_encoder=gcfg.get("encoder", "hash"))
     ds = PatchDataset(patch_dir / "train_patches.npy", normalizer, **gkw)
     loader = DataLoader(
         ds, batch_size=dc["batch_size"], shuffle=True,
@@ -106,7 +107,8 @@ def main():
         return model(x, None, c) if geo_on else model(x)
 
     start_epoch, step = 1, 0
-    ckpt_path = ckpt_dir / ("directmap_geo.pt" if geo_on else "directmap.pt")
+    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
+    ckpt_path = ckpt_dir / f"directmap{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}.pt"
     if args.resume and ckpt_path.exists():
         ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])

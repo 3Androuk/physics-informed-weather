@@ -68,7 +68,8 @@ def main():
 
     geo_on = cfg.get("geo", {}).get("enabled", False)
     seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
-    ckpt_name = f"residual{'_geo' if geo_on else ''}{seed_suffix}.pt"
+    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
+    ckpt_name = f"residual{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{seed_suffix}.pt"
 
     normalizer = load_norm_stats(patch_dir)
     gkw = {}
@@ -76,7 +77,8 @@ def main():
         gcfg = cfg["geo"]
         gkw = dict(origins_path=patch_dir / "train_origins.npy",
                    coords_full_path=patch_dir / "coords_full.npz",
-                   geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"])
+                   geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
+                   geo_encoder=gcfg.get("encoder", "hash"))
     ds = PatchDataset(patch_dir / "train_patches.npy", normalizer, **gkw)
     loader = DataLoader(
         ds, batch_size=tc["batch_size"], shuffle=True,

@@ -51,6 +51,11 @@ unet:
 # weights grew large). Static geography is smooth — cap the cells at ~150 km.
 geo:
   enabled: false                   # train the baseline first, then set true
+  # encoder: "hash" (Instant-NGP cube grid, default) or "healpix" (dense
+  # equal-area spherical pyramid — no hash collisions; precompute once on the
+  # cluster: python -m data.make_healpix_index --config config/t2m.yaml).
+  encoder: hash
+  healpix_nside_max: 128           # finest HEALPix level (~0.46 deg cells)
   input_dim: 3
   n_levels: 8
   n_features_per_level: 2
