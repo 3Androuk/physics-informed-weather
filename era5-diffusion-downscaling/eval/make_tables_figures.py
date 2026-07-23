@@ -191,8 +191,7 @@ def main():
                   f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
         table[tag] = row
 
-        _qualitative(normalizer, hf, diff, bic,
-                     preds.get("Direct map"), ratio, rc, results_dir)
+        _qualitative(normalizer, hf, preds, ratio, rc, results_dir)
 
     _save_table(table, results_dir)
     _plot_spectra(spectra, results_dir)
@@ -226,18 +225,24 @@ def main():
     print(f"\nAll outputs -> {results_dir}")
 
 
-def _qualitative(normalizer, hf, diff, bic, dm, ratio, rc, results_dir, idx=0):
+def _qualitative(normalizer, hf, preds, ratio, rc, results_dir, idx=0):
+    """One panel per method actually evaluated, plus input and reference, all
+    on the reference's color scale."""
     lf = degrade(hf[idx:idx + 1].cpu(), ratio, rc.get("smooth_sigma", 0.0))
-    panels = [("Input (LF)", lf), ("Bicubic", bic[idx:idx + 1])]
-    if dm is not None:
-        panels.append(("Direct map", dm[idx:idx + 1]))
-    panels += [("Diffusion", diff[idx:idx + 1]), ("Reference", hf[idx:idx + 1].cpu())]
+    panels = [("Input (LF)", lf)]
+    for name in ("Bicubic", "Direct map", "Residual", "Diffusion"):
+        if name in preds:
+            panels.append((name, preds[name][idx:idx + 1]))
+    panels.append(("Reference", hf[idx:idx + 1].cpu()))
+    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
+    vmin, vmax = float(ref.min()), float(ref.max())
     fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
     for ax, (title, t) in zip(axes, panels):
-        ax.imshow(normalizer.decode(t)[0, 0].numpy(), cmap="RdBu_r")
+        ax.imshow(normalizer.decode(t)[0, 0].numpy(), cmap="RdBu_r",
+                  vmin=vmin, vmax=vmax)
         ax.set_title(title)
         ax.axis("off")
-    fig.suptitle(f"{ratio}x reconstruction")
+    fig.suptitle(f"{ratio}x reconstruction (shared color scale)")
     fig.tight_layout()
     fig.savefig(results_dir / f"qualitative_{ratio}x.png", dpi=130, bbox_inches="tight")
     plt.close(fig)
