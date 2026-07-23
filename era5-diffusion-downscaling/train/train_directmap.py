@@ -35,12 +35,17 @@ def main():
                     help="Geo-conditioned regression: concat the hash-grid location "
                          "embedding to the input (CorrDiff-style static "
                          "conditioning); checkpoint becomes directmap_geo.pt.")
+    ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
+                    help="Override geo.encoder from the CLI so the config can "
+                         "keep its default.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
         cfg.setdefault("wandb", {})["enabled"] = True
     if args.geo:
         cfg.setdefault("geo", {})["enabled"] = True
+    if args.encoder is not None:
+        cfg.setdefault("geo", {})["encoder"] = args.encoder
     set_seed(cfg["seed"])
     device = get_device()
 
