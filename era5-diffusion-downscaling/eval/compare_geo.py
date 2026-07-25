@@ -101,6 +101,8 @@ def main():
     print(f"Comparing {name_a} (geo={geo_a}) vs {name_b} (geo={geo_b}) on {n} patches"
           f"{' | projection ON' if args.project else ''}")
 
+    stem = f"compare_{name_a}_vs_{name_b}{'_proj' if args.project else ''}"
+
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
     hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
@@ -127,7 +129,7 @@ def main():
                   f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
         table[tag] = row
         _qualitative(normalizer, hf, preds, ratio, rc,
-                     results_dir / f"geo_ablation_qualitative_{tag}.png")
+                     results_dir / f"{stem}_qualitative_{tag}.png")
 
     # ── Ensemble metrics (subset of patches; diffusion methods only) ──────
     if args.ensemble > 1:
@@ -159,9 +161,9 @@ def main():
                       f"CRPS {row['crps']:.4f} | spread {row['spread']:.4f}")
         table["ensemble"] = ens
 
-    with open(results_dir / "geo_ablation.json", "w") as f:
+    with open(results_dir / f"{stem}.json", "w") as f:
         json.dump(table, f, indent=2)
-    _plot(spectra, results_dir / "geo_ablation_spectrum.png")
+    _plot(spectra, results_dir / f"{stem}_spectrum.png")
     print(f"\nSaved -> {results_dir / 'geo_ablation.json'}, geo_ablation_spectrum.png, "
           f"and geo_ablation_qualitative_*.png")
 
@@ -191,9 +193,9 @@ def main():
                 wb_run.summary[f"{tag}/{method}/l2"] = v["l2"]
                 wb_run.summary[f"{tag}/{method}/spectrum_log_l1"] = v["spectrum_log_l1"]
         log["ablation/table"] = tbl
-        log["ablation/spectrum"] = wandb.Image(str(results_dir / "geo_ablation_spectrum.png"))
+        log["ablation/spectrum"] = wandb.Image(str(results_dir / f"{stem}_spectrum.png"))
         for rc in cfg["sample"]["reconstructions"]:
-            q = results_dir / f"geo_ablation_qualitative_{rc['ratio']}x.png"
+            q = results_dir / f"{stem}_qualitative_{rc['ratio']}x.png"
             if q.exists():
                 log[f"ablation/qualitative_{rc['ratio']}x"] = wandb.Image(str(q))
         wb_run.log(log)
