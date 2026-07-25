@@ -1,16 +1,16 @@
-"""Geo-on vs geo-off ablation for the diffusion downscaler.
+"""Head-to-head comparison of two guided-diffusion checkpoints.
 
-Loads two diffusion checkpoints — geo-conditioned (hash-grid location embedding)
-and the plain baseline — and evaluates both on the SAME test patches at every
-ratio, alongside bicubic. Reports L2 (RMSE) and a power-spectrum metric so you
-can see whether the geographic conditioning helps, and where (in-distribution 4x
-vs out-of-distribution 8x).
+Originally geo-vs-baseline; now generic: EITHER checkpoint may be
+geo-conditioned (hash or healpix). Each model receives the geo payload its own
+config requires (hash coords vs healpix indices), built from the same test
+origins, so hash-geo vs healpix-geo, geo vs plain, or seed-replicate pairs all
+compare on identical test patches at every ratio, alongside bicubic. Reports
+L2 (RMSE) and the power-spectrum metric; optional per-step DDNM projection and
+ensemble metrics (ensemble-mean L2, CRPS, spread).
 
-Run (after training both models):
-    python -m train.train_diffusion  --config config/default.yaml        # diffusion.pt
-    # set geo.enabled: true in the config, then:
-    python -m train.train_diffusion  --config config/default.yaml        # diffusion_geo.pt
-    python -m eval.compare_geo        --config config/default.yaml
+Run:
+    python -m eval.compare_geo --config config/t2m.yaml --project \
+        --geo-ckpt diffusion_geo_hpx.pt --base-ckpt diffusion_geo.pt
 """
 
 import argparse
@@ -48,30 +48,25 @@ def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
     return torch.cat(outs, dim=0)
 
 
-def _load_test(patch_dir, normalizer, n, geo_cfg, device):
-    """Return (hf_norm, hf_phys, coords-or-None). coords built if geo_cfg given."""
-    if geo_cfg is not None:
-        ds = PatchDataset(
-            patch_dir / "test_patches.npy", normalizer,
-            origins_path=patch_dir / "test_origins.npy",
-            coords_full_path=patch_dir / "coords_full.npz",
-            geo_input_dim=geo_cfg["input_dim"], altitude=geo_cfg["altitude"],
-            geo_encoder=geo_cfg.get("encoder", "hash"),
-        )
-        items = [ds[i] for i in range(n)]
-        hf = torch.stack([it[0] for it in items]).to(device)
-        coords = torch.stack([it[1] for it in items]).to(device)
-        return hf, normalizer.decode(hf.cpu()), coords
-    ds = PatchDataset(patch_dir / "test_patches.npy", normalizer)
-    hf = torch.stack([ds[i] for i in range(n)]).to(device)
-    return hf, normalizer.decode(hf.cpu()), None
+def _payload(patch_dir, normalizer, n, geo_cfg, device):
+    """Geo payload stack for the first n test patches, per one model's config."""
+    ds = PatchDataset(
+        patch_dir / "test_patches.npy", normalizer,
+        origins_path=patch_dir / "test_origins.npy",
+        coords_full_path=patch_dir / "coords_full.npz",
+        geo_input_dim=geo_cfg["input_dim"], altitude=geo_cfg["altitude"],
+        geo_encoder=geo_cfg.get("encoder", "hash"),
+    )
+    return torch.stack([ds[i][1] for i in range(n)]).to(device)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/default.yaml")
-    ap.add_argument("--geo-ckpt", default="diffusion_geo.pt")
-    ap.add_argument("--base-ckpt", default="diffusion.pt")
+    ap.add_argument("--geo-ckpt", default="diffusion_geo.pt",
+                    help="model A checkpoint (may be geo or plain)")
+    ap.add_argument("--base-ckpt", default="diffusion.pt",
+                    help="model B checkpoint (may be geo or plain)")
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
@@ -97,22 +92,29 @@ def main():
     n = min(cfg["eval"]["n_test_patches"],
             len(PatchDataset(patch_dir / "test_patches.npy", normalizer)))
 
-    geo_model, geo_diff, geo_cfg = load_diffusion(ckpt_dir / args.geo_ckpt, device)
-    base_model, base_diff, _ = load_diffusion(ckpt_dir / args.base_ckpt, device)
-    assert geo_cfg["geo"]["enabled"], f"{args.geo_ckpt} is not a geo checkpoint"
-    print(f"Comparing geo ({args.geo_ckpt}) vs baseline ({args.base_ckpt}) on {n} patches"
+    name_a = Path(args.geo_ckpt).stem
+    name_b = Path(args.base_ckpt).stem
+    model_a, diff_a, cfg_a = load_diffusion(ckpt_dir / args.geo_ckpt, device)
+    model_b, diff_b, cfg_b = load_diffusion(ckpt_dir / args.base_ckpt, device)
+    geo_a = cfg_a.get("geo", {}).get("enabled", False)
+    geo_b = cfg_b.get("geo", {}).get("enabled", False)
+    print(f"Comparing {name_a} (geo={geo_a}) vs {name_b} (geo={geo_b}) on {n} patches"
           f"{' | projection ON' if args.project else ''}")
 
-    hf, hf_phys, coords = _load_test(patch_dir, normalizer, n, geo_cfg["geo"], device)
+    ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
+    hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
+    hf_phys = normalizer.decode(hf.cpu())
+    coords_a = _payload(patch_dir, normalizer, n, cfg_a["geo"], device) if geo_a else None
+    coords_b = _payload(patch_dir, normalizer, n, cfg_b["geo"], device) if geo_b else None
 
     table, spectra = {}, {"Reference": radial_power_spectrum(hf_phys)}
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]; tag = f"{ratio}x"
         preds = {
-            "Geo": _recon(geo_diff, geo_model, hf, ratio, rc, eta, coords, args.batch,
-                          label=f"{tag} Geo", project=args.project),
-            "No-geo": _recon(base_diff, base_model, hf, ratio, rc, eta, None, args.batch,
-                             label=f"{tag} No-geo", project=args.project),
+            name_a: _recon(diff_a, model_a, hf, ratio, rc, eta, coords_a, args.batch,
+                           label=f"{tag} {name_a}", project=args.project),
+            name_b: _recon(diff_b, model_b, hf, ratio, rc, eta, coords_b, args.batch,
+                           label=f"{tag} {name_b}", project=args.project),
             "Bicubic": torch.cat([reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
                                   for i in range(0, len(hf), args.batch)]),
         }
@@ -121,7 +123,8 @@ def main():
             pp = normalizer.decode(p)
             row[name] = {"l2": l2_norm(pp, hf_phys), "spectrum_log_l1": spectrum_log_l1(pp, hf_phys)}
             spectra[f"{name} {tag}"] = radial_power_spectrum(pp)
-            print(f"  {tag} {name:8s} | L2 {row[name]['l2']:.4f} | spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
+            print(f"  {tag} {name:28s} | L2 {row[name]['l2']:.4f} | "
+                  f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
         table[tag] = row
         _qualitative(normalizer, hf, preds, ratio, rc,
                      results_dir / f"geo_ablation_qualitative_{tag}.png")
@@ -131,13 +134,13 @@ def main():
         from eval.metrics import crps_ensemble
         n_e = min(args.ensemble_patches, len(hf))
         hf_e, hf_e_phys = hf[:n_e], hf_phys[:n_e]
-        coords_e = None if coords is None else coords[:n_e]
         print(f"\nEnsemble metrics: {args.ensemble} members x {n_e} patches")
         ens = {}
         for rc in cfg["sample"]["reconstructions"]:
             ratio = rc["ratio"]; tag = f"{ratio}x"
-            for name, (dif, mod, c) in {"Geo": (geo_diff, geo_model, coords_e),
-                                        "No-geo": (base_diff, base_model, None)}.items():
+            for name, (dif, mod, c) in {
+                    name_a: (diff_a, model_a, None if coords_a is None else coords_a[:n_e]),
+                    name_b: (diff_b, model_b, None if coords_b is None else coords_b[:n_e])}.items():
                 members = [normalizer.decode(
                     _recon(dif, mod, hf_e, ratio, rc, eta, c, args.batch,
                            label=f"{tag} {name} member {m + 1}/{args.ensemble}",
@@ -151,7 +154,7 @@ def main():
                     "spread": float(stack.std(0).mean()),
                 }
                 ens.setdefault(tag, {})[name] = row
-                print(f"  {tag} {name:8s} | single L2 {row['single_l2']:.4f} | "
+                print(f"  {tag} {name:28s} | single L2 {row['single_l2']:.4f} | "
                       f"ens-mean L2 {row['ensemble_mean_l2']:.4f} | "
                       f"CRPS {row['crps']:.4f} | spread {row['spread']:.4f}")
         table["ensemble"] = ens
@@ -164,11 +167,11 @@ def main():
 
     wb_run, wandb = init_wandb(cfg, job_type="compare_geo",
                                extra_config={"n_test_patches": n,
-                                             "geo_ckpt": args.geo_ckpt,
-                                             "base_ckpt": args.base_ckpt,
+                                             "ckpt_a": args.geo_ckpt,
+                                             "ckpt_b": args.base_ckpt,
                                              "projection": args.project,
                                              "ensemble": args.ensemble},
-                               name=run_name(cfg, "ablation", Path(args.geo_ckpt).stem,
+                               name=run_name(cfg, "ablation", name_a, "vs", name_b,
                                              "proj" if args.project else "",
                                              f"ens{args.ensemble}" if args.ensemble > 1 else ""))
     if wb_run is not None:
@@ -180,15 +183,13 @@ def main():
             if tag == "ensemble":
                 for etag, erow in row.items():
                     for method, v in erow.items():
-                        key = method.lower().replace("-", "_")
                         for mk, mv in v.items():
-                            wb_run.summary[f"ensemble/{etag}/{key}/{mk}"] = mv
+                            wb_run.summary[f"ensemble/{etag}/{method}/{mk}"] = mv
                 continue
             for method, v in row.items():
                 tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
-                key = method.lower().replace("-", "_")
-                wb_run.summary[f"{tag}/{key}/l2"] = v["l2"]
-                wb_run.summary[f"{tag}/{key}/spectrum_log_l1"] = v["spectrum_log_l1"]
+                wb_run.summary[f"{tag}/{method}/l2"] = v["l2"]
+                wb_run.summary[f"{tag}/{method}/spectrum_log_l1"] = v["spectrum_log_l1"]
         log["ablation/table"] = tbl
         log["ablation/spectrum"] = wandb.Image(str(results_dir / "geo_ablation_spectrum.png"))
         for rc in cfg["sample"]["reconstructions"]:
@@ -206,20 +207,19 @@ def _qualitative(normalizer, hf, preds, ratio, rc, path, idx=0):
     hidden by per-panel autoscaling."""
     from data.degrade import degrade
     lf = degrade(hf[idx:idx + 1].cpu(), ratio, rc.get("smooth_sigma", 0.0))
-    panels = [("Input (LF)", lf),
-              ("Bicubic", preds["Bicubic"][idx:idx + 1]),
-              ("No-geo", preds["No-geo"][idx:idx + 1]),
-              ("Geo", preds["Geo"][idx:idx + 1]),
-              ("Reference", hf[idx:idx + 1].cpu())]
+    panels = [("Input (LF)", lf)]
+    for name, p in preds.items():
+        panels.append((name, p[idx:idx + 1]))
+    panels.append(("Reference", hf[idx:idx + 1].cpu()))
     ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
     vmin, vmax = float(ref.min()), float(ref.max())
     fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
     for ax, (title, t) in zip(axes, panels):
         ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
                   vmin=vmin, vmax=vmax)
-        ax.set_title(title)
+        ax.set_title(title, fontsize=9)
         ax.axis("off")
-    fig.suptitle(f"{ratio}x reconstruction: geo vs no-geo (shared color scale)")
+    fig.suptitle(f"{ratio}x reconstruction (shared color scale)")
     fig.tight_layout()
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -231,8 +231,8 @@ def _plot(spectra, path):
         ax.loglog(k[1:], e[1:], "-" if label == "Reference" else "--",
                   lw=2.2 if label == "Reference" else 1.4, label=label)
     ax.set_xlabel("wavenumber k"); ax.set_ylabel("E(k)")
-    ax.set_title("Geo vs no-geo: power spectrum")
-    ax.legend(fontsize=8); ax.grid(True, which="both", alpha=0.3)
+    ax.set_title("Checkpoint comparison: power spectrum")
+    ax.legend(fontsize=7); ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout(); fig.savefig(path, dpi=130, bbox_inches="tight"); plt.close(fig)
 
 
