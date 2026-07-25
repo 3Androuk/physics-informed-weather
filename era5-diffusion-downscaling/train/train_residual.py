@@ -27,7 +27,8 @@ from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.residual import build_residual_model  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   run_name, set_seed)
 
 
 def _bicubic_mean(y: torch.Tensor, ratio: int) -> torch.Tensor:
@@ -185,7 +186,10 @@ def main():
                                extra_config={"unet_params": n_params,
                                              "n_train_patches": len(ds),
                                              "train_ratios": ratios,
-                                             "res_std": res_std})
+                                             "res_std": res_std,
+                                             "mean_ckpt": args.mean_ckpt},
+                               name=run_name(cfg, Path(ckpt_name).stem,
+                                             "resumed" if start_epoch > 1 else ""))
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
 

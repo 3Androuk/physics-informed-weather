@@ -29,7 +29,7 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from eval.metrics import radial_power_spectrum, spectrum_log_l1, l2_norm  # noqa: E402
 from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
                                 reconstruct_diffusion)
-from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
+from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # noqa: E402
 
 
 def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
@@ -167,7 +167,10 @@ def main():
                                              "geo_ckpt": args.geo_ckpt,
                                              "base_ckpt": args.base_ckpt,
                                              "projection": args.project,
-                                             "ensemble": args.ensemble})
+                                             "ensemble": args.ensemble},
+                               name=run_name(cfg, "ablation", Path(args.geo_ckpt).stem,
+                                             "proj" if args.project else "",
+                                             f"ens{args.ensemble}" if args.ensemble > 1 else ""))
     if wb_run is not None:
         # Scalars go to the run SUMMARY (columns in the runs table), not log():
         # a one-shot eval otherwise creates one single-point chart per metric.

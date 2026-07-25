@@ -34,7 +34,7 @@ from sample.reconstruct import (load_diffusion, load_directmap,  # noqa: E402
                                 load_residual, reconstruct_bicubic,
                                 reconstruct_diffusion, reconstruct_directmap,
                                 reconstruct_residual)
-from utils import ensure_dir, get_device, init_wandb, load_config  # noqa: E402
+from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # noqa: E402
 
 
 @torch.no_grad()
@@ -199,7 +199,11 @@ def main():
 
     wb_run, wandb = init_wandb(cfg, job_type="eval",
                                extra_config={"n_test_patches": n,
-                                             "has_directmap": dm_model is not None})
+                                             "has_directmap": dm_model is not None},
+                               name=run_name(cfg, "table", Path(args.ckpt).stem,
+                                             "proj" if args.project else "",
+                                             f"res-{Path(args.res_ckpt).stem}" if args.res_ckpt else "",
+                                             f"dm-{Path(args.dm_ckpt).stem}" if dm_model is not None else ""))
     if wb_run is not None:
         # Scalars go to the run SUMMARY (columns in the runs table), not log():
         # a one-shot eval otherwise creates one single-point chart per metric.

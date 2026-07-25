@@ -22,7 +22,8 @@ from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   run_name, set_seed)
 
 
 def main():
@@ -155,7 +156,9 @@ def main():
         print("(tensorboard unavailable — skipping logging)")
 
     wb_run, wandb = init_wandb(cfg, job_type="train_diffusion",
-                               extra_config={"unet_params": n_params, "n_train_patches": len(ds)})
+                               extra_config={"unet_params": n_params, "n_train_patches": len(ds)},
+                               name=run_name(cfg, Path(ckpt_name).stem,
+                                             "resumed" if start_epoch > 1 else ""))
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
 

@@ -42,21 +42,36 @@ def ensure_dir(path: str | os.PathLike) -> Path:
     return p
 
 
-def init_wandb(cfg: dict, job_type: str, extra_config: dict | None = None):
+_VAR_SHORT = {"2m_temperature": "t2m", "geopotential": "z500"}
+
+
+def run_name(cfg: dict, *parts: str) -> str:
+    """Canonical wandb run name: short variable + identity parts.
+
+    Callers pass the checkpoint stem (which already encodes model kind, geo,
+    encoder, mean type, and seed) plus any extra tags; empty parts are
+    skipped. Example: run_name(cfg, 'diffusion_geo_hpx', 'resumed')
+    -> 't2m-diffusion_geo_hpx-resumed'."""
+    var = cfg.get("data", {}).get("variable", "")
+    var = _VAR_SHORT.get(var, var)
+    return "-".join(p for p in (var, *parts) if p)
+
+
+def init_wandb(cfg: dict, job_type: str, extra_config: dict | None = None,
+               name: str | None = None):
     """Start a wandb run when cfg['wandb'].enabled is true.
 
     Opt-in: returns (None, None) when disabled so callers can guard with
     `if run is not None`. Returns (run, wandb_module) when enabled — the module
     is handed back so callers can build wandb.Image() etc. without re-importing.
-    """
+    Name precedence: explicit wandb.name in the config > `name` argument >
+    auto default (variable-geo-job)."""
     wcfg = cfg.get("wandb", {})
     if not wcfg.get("enabled"):
         return None, None
     import wandb
     config = {**cfg, **(extra_config or {})}
-    # Default name identifies variable + geo mode + job, so runs launched from
-    # a shared config (e.g. baseline vs --geo) can't end up mislabeled.
-    name = wcfg.get("name")
+    name = wcfg.get("name") or name
     if not name and "data" in cfg:
         geo_tag = "geo" if cfg.get("geo", {}).get("enabled") else "base"
         name = f"{cfg['data']['variable']}-{geo_tag}-{job_type}"

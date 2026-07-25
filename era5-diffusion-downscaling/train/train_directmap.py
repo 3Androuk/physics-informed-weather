@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
-from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   run_name, set_seed)
 
 
 def main():
@@ -101,11 +102,6 @@ def main():
             val_x = torch.stack([val_ds[i] for i in range(n_val)])
         print(f"Val patches: {n_val}")
 
-    wb_run, _ = init_wandb(cfg, job_type="train_directmap",
-                           extra_config={"train_ratio": ratio, "n_train_patches": len(ds)})
-    if wb_run is not None:
-        print(f"wandb: logging to {wb_run.url}")
-
     if geo_on:
         from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
         geo_enc = build_geo_encoder(cfg)
@@ -139,6 +135,14 @@ def main():
             print("(old checkpoint: weights only — resuming from epoch 1 counters)")
     elif args.resume:
         print(f"(no checkpoint at {ckpt_path} — starting fresh)")
+
+    wb_run, _ = init_wandb(cfg, job_type="train_directmap",
+                           extra_config={"train_ratio": train_ratios if train_ratios else ratio,
+                                         "n_train_patches": len(ds)},
+                           name=run_name(cfg, ckpt_path.stem,
+                                         "resumed" if start_epoch > 1 else ""))
+    if wb_run is not None:
+        print(f"wandb: logging to {wb_run.url}")
     # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
     # a multiple of log_every, and resetting per epoch both drops the tail
     # batches and makes the next log divide a partial sum by the full window.
