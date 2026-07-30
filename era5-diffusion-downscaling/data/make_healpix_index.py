@@ -43,7 +43,8 @@ def main():
     cfg = load_config(args.config)
     g = cfg["geo"]
     nsides = healpix_nside_ladder(
-        g["n_levels"], g.get("healpix_nside_min", 1), g.get("healpix_nside_max", 128))
+        g.get("healpix_n_levels", g["n_levels"]),
+        g.get("healpix_nside_min", 1), g.get("healpix_nside_max", 128))
     patch_dir = Path(cfg["paths"]["patch_dir"])
     cf = np.load(patch_dir / "coords_full.npz")
     lat, lon = cf["lat"], cf["lon"]

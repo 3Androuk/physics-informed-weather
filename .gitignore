@@ -13,6 +13,7 @@ build/
 .venv/
 .vscode/
 .idea/
+.DS_Store
 
 # Model checkpoints & weights
 checkpoints/

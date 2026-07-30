@@ -35,6 +35,20 @@ diffusion:
   beta_start: 1.0e-4
   beta_end: 2.0e-2
 
+transport:
+  train_ratios: [2, 4, 8]
+  eval_ratios: [4, 8, 16]         # 16x is held out during training
+  time_scale: 1000.0
+  time_epsilon: 1.0e-4
+  sample_steps: 100
+  solver: heun
+  projection: final
+  stochastic_interpolant:
+    gamma: 0.5
+    score_weight: 1.0
+    sampler: ode
+    stochasticity: 0.1
+
 unet:
   in_channels: 1
   out_channels: 1
@@ -55,6 +69,7 @@ geo:
   # equal-area spherical pyramid — no hash collisions; precompute once on the
   # cluster: python -m data.make_healpix_index --config config/t2m.yaml).
   encoder: hash
+  healpix_n_levels: 8
   healpix_nside_max: 128           # finest HEALPix level (~0.46 deg cells)
   input_dim: 3
   n_levels: 8
@@ -65,7 +80,7 @@ geo:
   altitude: null
 
 # Split-model Phase A: conditional diffusion on the residual HF - bicubic,
-# ratio randomized per batch; test at a held-out ratio (6) for generalization.
+# ratio randomized per batch; test at a held-out divisor (16) for generalization.
 residual:
   train_ratios: [2, 4, 8]
   n_steps: 100                     # DDIM steps when sampling the residual

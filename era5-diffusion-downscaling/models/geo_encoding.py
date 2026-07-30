@@ -235,7 +235,7 @@ def build_geo_encoder(cfg: dict):
     g = cfg["geo"]
     if g.get("encoder", "hash") == "healpix":
         return HealpixGrid(
-            n_levels=g["n_levels"],
+            n_levels=g.get("healpix_n_levels", g["n_levels"]),
             n_features_per_level=g["n_features_per_level"],
             nside_min=g.get("healpix_nside_min", 1),
             nside_max=g.get("healpix_nside_max", 128),

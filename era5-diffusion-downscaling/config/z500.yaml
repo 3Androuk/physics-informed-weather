@@ -39,6 +39,20 @@ diffusion:
   beta_start: 1.0e-4
   beta_end: 2.0e-2
 
+transport:
+  train_ratios: [2, 4, 8]
+  eval_ratios: [4, 8, 16]
+  time_scale: 1000.0
+  time_epsilon: 1.0e-4
+  sample_steps: 100
+  solver: heun
+  projection: final
+  stochastic_interpolant:
+    gamma: 0.5
+    score_weight: 1.0
+    sampler: ode
+    stochasticity: 0.1
+
 unet:
   in_channels: 1
   out_channels: 1
@@ -56,6 +70,8 @@ geo:
   enabled: false
   input_dim: 3
   n_levels: 12
+  healpix_n_levels: 8
+  healpix_nside_max: 128
   n_features_per_level: 2
   log2_hashmap_size: 19
   base_resolution: 16

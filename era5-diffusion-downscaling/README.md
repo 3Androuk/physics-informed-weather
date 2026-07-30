@@ -36,6 +36,27 @@ out-of-distribution.
 - **Direct-mapping UNet** `f: X→Y`, trained on **4× pairs only** — the brittle
   benchmark that should degrade on 8× (out-of-distribution).
 
+## Conditional transport models
+
+Two alternatives model the conditional high-resolution distribution directly.
+Unlike the original unconditional DDPM, both receive the upsampled coarse field
+as a conditioning channel during training and randomize the degradation ratio
+per batch. Optional hash-grid or HEALPix geographic conditioning is supported
+through the same `geo` config used elsewhere in the project.
+
+- **Flow matching:** learns the conditional velocity on the linear path
+  `x_t = (1-t)z + t x_HF`, with target velocity `x_HF-z`. Sampling integrates
+  the learned probability-flow ODE from Gaussian noise to a high-resolution
+  field using Euler or Heun steps.
+- **Stochastic interpolants:** uses
+  `x_t = (1-t)z + t x_HF + γ sin(πt)ε`. The UNet jointly learns the velocity
+  and a variance-scaled score. It supports deterministic probability-flow ODE
+  sampling and a marginal-preserving SDE sampler for ensembles.
+
+Both samplers optionally apply an exact final block-average projection so the
+generated field coarsens back to the observed input. The default training ratios
+are `{2, 4, 8}` and the default evaluation also includes held-out `16×`.
+
 ## Data
 
 ERA5 Z500 is streamed from the **WeatherBench 2 public GCS** Zarr store
@@ -57,9 +78,23 @@ python -m data.make_patches       --config config/default.yaml
 python -m train.train_diffusion   --config config/default.yaml
 python -m train.train_directmap   --config config/default.yaml
 
+# Conditional transport alternatives (one model across configured ratios)
+python -m train.train_flow_matching          --config config/default.yaml
+python -m train.train_stochastic_interpolant --config config/default.yaml
+
 # 3. Robustness experiment + figures (same diffusion model on 4x AND 8x)
 python -m eval.make_tables_figures --config config/default.yaml
+
+# Flow matching vs stochastic interpolants vs bicubic
+python -m eval.compare_transports --config config/default.yaml
 ```
+
+Transport settings live under `transport:` in each config. Useful overrides for
+evaluation include `--steps`, `--solver {euler,heun}`,
+`--si-sampler {ode,sde}`, `--stochasticity`, and
+`--projection {none,final,each}`. Add `--geo` or
+`--geo --encoder healpix` to either training command to enable geographic
+conditioning; HEALPix requires running `data.make_healpix_index` first.
 
 ### Experiment tracking (Weights & Biases)
 
