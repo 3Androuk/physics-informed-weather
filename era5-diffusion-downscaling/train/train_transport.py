@@ -17,8 +17,8 @@ from data.degrade import coarsen, degrade  # noqa: E402
 from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.transport import build_transport, build_transport_model  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (display_channel, ensure_dir, get_device, init_wandb,  # noqa: E402
+                   load_config, run_name, set_seed)
 
 
 def _parser(method: str):
@@ -290,14 +290,15 @@ def _save_samples(process, model, subset, normalizer, device, geo_on,
         row.append(("Target", target[i:i + 1]))
         panels.append(row)
 
+    disp = display_channel(cfg)
     fig, axes = plt.subplots(len(panels), len(panels[0]),
                              figsize=(4 * len(panels[0]), 4 * len(panels)))
     axes = axes.reshape(len(panels), len(panels[0]))
     for row_idx, row in enumerate(panels):
-        ref = normalizer.decode(row[-1][1].cpu())[0, 0].numpy()
+        ref = normalizer.decode(row[-1][1].cpu())[0, disp].numpy()
         vmin, vmax = float(ref.min()), float(ref.max())
         for ax, (title, tensor) in zip(axes[row_idx], row):
-            ax.imshow(normalizer.decode(tensor.cpu())[0, 0].numpy(),
+            ax.imshow(normalizer.decode(tensor.cpu())[0, disp].numpy(),
                       cmap="RdBu_r", vmin=vmin, vmax=vmax)
             ax.set_title(title)
             ax.axis("off")
@@ -305,9 +306,11 @@ def _save_samples(process, model, subset, normalizer, device, geo_on,
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
+    # Spectrum error on the display channel (physical units mix across variables).
     pred_phys = normalizer.decode(torch.cat([r for r, _ in recs]).cpu())
     truth_phys = normalizer.decode(torch.cat([y for _, y in recs]).cpu())
-    return {"samples/spectrum_log_l1": spectrum_log_l1(pred_phys, truth_phys)}
+    return {"samples/spectrum_log_l1": spectrum_log_l1(
+        pred_phys[:, disp:disp + 1], truth_phys[:, disp:disp + 1])}
 
 
 def _sample(process, model, low_res, coords, coarse, ratio, cfg, method):

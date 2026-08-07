@@ -57,9 +57,40 @@ Both samplers optionally apply an exact final block-average projection so the
 generated field coarsens back to the observed input. The default training ratios
 are `{2, 4, 8}` and the default evaluation also includes held-out `16×`.
 
+## Multivariable (20-channel) downscaling
+
+`config/wb2_20var.yaml` runs the same pipeline on **20 WB2 variables jointly —
+20 input and 20 output channels**: 5 surface fields (t2m, u10, v10, mslp,
+total-column water vapour) plus geopotential, temperature, u, v and specific
+humidity at 500/700/850 hPa. t2m is channel 0 and the *display channel* used
+for figures and the headline physical-unit metrics
+(`eval.display_channel`).
+
+- Channels are listed under `data.variables` (name + optional pressure level);
+  the list order fixes the channel order everywhere, and
+  `unet.in_channels`/`out_channels` must match its length.
+- Downloaded fields, patches and models are all `(…, C, H, W)`; normalization
+  is per-channel z-score.
+- Evaluation reports the display channel in physical units (as before), plus
+  an all-channel L2 in normalized units and a per-channel breakdown in the
+  JSON outputs.
+- Single-variable configs (`t2m.yaml`, `z500.yaml`, `default.yaml`) are
+  unchanged and keep working; they are just the C=1 case.
+
+```bash
+python -m data.download_era5              --config config/wb2_20var.yaml
+python -m data.make_patches               --config config/wb2_20var.yaml
+python -m train.train_flow_matching       --config config/wb2_20var.yaml
+python -m eval.compare_transports         --config config/wb2_20var.yaml
+```
+
+Note the 20-channel dataset is ~20x the single-variable footprint (the default
+patch settings produce ~35 GB of training patches; patches are streamed to an
+on-disk memmap, never held in RAM — reduce `patches.per_field` to shrink it).
+
 ## Data
 
-ERA5 Z500 is streamed from the **WeatherBench 2 public GCS** Zarr store
+ERA5 fields are streamed from the **WeatherBench 2 public GCS** Zarr store
 (`gs://weatherbench2/...`, no credentials), then cropped into 128×128 patches
 with a time-based train/test split. Low-fidelity inputs are produced by
 average-pool coarsening (4× → 32×32, 8× → 16×16) and nearest-upsampling back to

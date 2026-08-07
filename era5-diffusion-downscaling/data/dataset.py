@@ -16,22 +16,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class Normalizer:
-    """Z-score normalization with stored scalar mean/std (in physical units)."""
+    """Per-channel z-score normalization (in physical units).
 
-    def __init__(self, mean: float, std: float):
-        self.mean = float(mean)
-        self.std = float(std) if float(std) > 1e-8 else 1.0
+    mean/std are stored as (C, 1, 1) tensors that broadcast over
+    (..., C, H, W); a scalar (legacy single-channel stats) becomes C=1 and
+    broadcasts over any channel count exactly as before.
+    """
+
+    def __init__(self, mean, std):
+        mean = np.asarray(mean, dtype=np.float32).reshape(-1)
+        std = np.asarray(std, dtype=np.float32).reshape(-1)
+        std = np.where(std > 1e-8, std, 1.0)
+        self.mean = torch.from_numpy(mean).view(-1, 1, 1)
+        self.std = torch.from_numpy(std).view(-1, 1, 1)
+
+    def _stats(self, x: torch.Tensor):
+        return (self.mean.to(device=x.device, dtype=x.dtype),
+                self.std.to(device=x.device, dtype=x.dtype))
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.mean) / self.std
+        mean, std = self._stats(x)
+        return (x - mean) / std
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
-        return x * self.std + self.mean
+        mean, std = self._stats(x)
+        return x * std + mean
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "Normalizer":
         d = np.load(path)
-        return cls(float(d["mean"]), float(d["std"]))
+        return cls(d["mean"], d["std"])
 
 
 def load_norm_stats(patch_dir: str | Path) -> Normalizer:
@@ -39,7 +53,7 @@ def load_norm_stats(patch_dir: str | Path) -> Normalizer:
 
 
 class PatchDataset(Dataset):
-    """High-fidelity patches, returned z-score normalized as (1, H, W) tensors.
+    """High-fidelity patches, returned z-score normalized as (C, H, W) tensors.
 
     If `origins_path` and `coords_full_path` are given, each item is instead a
     tuple (patch, geo_payload) used for geo-conditioning. The payload depends

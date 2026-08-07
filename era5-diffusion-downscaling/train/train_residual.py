@@ -27,8 +27,8 @@ from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.residual import build_residual_model  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (display_channel, ensure_dir, get_device, init_wandb,  # noqa: E402
+                   load_config, run_name, set_seed)
 
 
 def _bicubic_mean(y: torch.Tensor, ratio: int) -> torch.Tensor:
@@ -267,7 +267,7 @@ def main():
             fig_path = results_dir / f"residual_epoch{epoch:03d}.png"
             spec = _save_recons(diffusion, ema.shadow, val_loader.dataset, normalizer,
                                 device, res_std, rcfg.get("n_steps", 100), need_coords,
-                                mean_fn, fig_path)
+                                mean_fn, fig_path, disp=display_channel(cfg))
             if wb_run is not None:
                 log = {"recons": wandb.Image(str(fig_path))}
                 if spec is not None:
@@ -330,10 +330,10 @@ def _val_loss(diffusion, model, val_loader, device, ratio, res_std, need_coords,
 
 @torch.no_grad()
 def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
-                 n_steps, need_coords, mean_fn, path):
+                 n_steps, need_coords, mean_fn, path, disp=0):
     """2 fixed val patches reconstructed at 4x and 8x: mean | mean+residual |
-    target, shared color scale. Returns spectrum_log_l1 of the recons vs
-    targets (both ratios pooled) or None."""
+    target, shared color scale (display channel). Returns spectrum_log_l1 of
+    the recons vs targets (both ratios pooled, display channel) or None."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -364,10 +364,10 @@ def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
     fig, axes = plt.subplots(len(panels), 5, figsize=(20, 4 * len(panels)))
     axes = axes.reshape(len(panels), 5)
     for r_i, row in enumerate(panels):
-        ref = normalizer.decode(row[-1][1].cpu())[0, 0].numpy()
+        ref = normalizer.decode(row[-1][1].cpu())[0, disp].numpy()
         vmin, vmax = float(ref.min()), float(ref.max())
         for ax, (title, t) in zip(axes[r_i], row):
-            ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
+            ax.imshow(normalizer.decode(t.cpu())[0, disp].numpy(), cmap="RdBu_r",
                       vmin=vmin, vmax=vmax)
             ax.set_title(title)
             ax.axis("off")
@@ -379,7 +379,7 @@ def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
 
     rec_phys = normalizer.decode(torch.cat(recs).cpu())
     tgt_phys = normalizer.decode(torch.cat([y, y]).cpu())
-    return spectrum_log_l1(rec_phys, tgt_phys)
+    return spectrum_log_l1(rec_phys[:, disp:disp + 1], tgt_phys[:, disp:disp + 1])
 
 
 if __name__ == "__main__":

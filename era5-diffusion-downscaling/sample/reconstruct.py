@@ -142,7 +142,7 @@ def _cli():
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from data.dataset import PatchDataset, load_norm_stats
-    from utils import ensure_dir, get_device, load_config
+    from utils import display_channel, ensure_dir, get_device, load_config
 
     ap = argparse.ArgumentParser(description="Single-ratio reconstruction demo.")
     ap.add_argument("--config", default="config/default.yaml")
@@ -168,9 +168,10 @@ def _cli():
     panels = {
         "Input (LF)": lf, "Bicubic": bic, "Diffusion": diff, "Reference": hf,
     }
+    disp = display_channel(cfg)
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
     for ax, (title, t) in zip(axes, panels.items()):
-        img = normalizer.decode(t.cpu())[0, 0].numpy()
+        img = normalizer.decode(t.cpu())[0, disp].numpy()
         ax.imshow(img, cmap="RdBu_r")
         ax.set_title(title)
         ax.axis("off")

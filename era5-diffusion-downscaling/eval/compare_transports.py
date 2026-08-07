@@ -17,7 +17,8 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from sample.reconstruct import reconstruct_bicubic  # noqa: E402
 from sample.transport import load_transport, reconstruct_transport  # noqa: E402
 from eval.metrics import l2_norm, radial_power_spectrum, spectrum_log_l1  # noqa: E402
-from utils import ensure_dir, get_device, load_config  # noqa: E402
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   get_device, load_config)
 
 
 def main():
@@ -45,6 +46,10 @@ def main():
     n = min(cfg["eval"]["n_test_patches"], len(plain_ds))
     hf = torch.stack([plain_ds[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
+    labels_ch = channel_labels(cfg["data"])
+    disp = display_channel(cfg)
+    multi = len(labels_ch) > 1
+    hf_disp = hf_phys[:, disp:disp + 1]  # figures + headline metrics channel
 
     specs = [
         ("Flow matching", ckpt_dir / args.flow_ckpt),
@@ -64,7 +69,7 @@ def main():
 
     ratios = cfg.get("transport", {}).get("eval_ratios", [4, 8])
     table = {}
-    spectra = {"Reference": radial_power_spectrum(hf_phys)}
+    spectra = {"Reference": radial_power_spectrum(hf_disp)}
     for ratio in ratios:
         preds = {"Bicubic": _batched_bicubic(hf, ratio, args.batch)}
         for label, model, process, model_cfg, method, coords in loaded:
@@ -73,16 +78,29 @@ def main():
         row = {}
         for label, pred in preds.items():
             physical = normalizer.decode(pred)
+            p_disp = physical[:, disp:disp + 1]
+            # Headline metrics: display channel in physical units; multi-channel
+            # runs additionally get an all-channel L2 in normalized units and
+            # the per-channel physical breakdown (see make_tables_figures).
             row[label] = {
-                "l2": l2_norm(physical, hf_phys),
-                "spectrum_log_l1": spectrum_log_l1(physical, hf_phys),
+                "l2": l2_norm(p_disp, hf_disp),
+                "spectrum_log_l1": spectrum_log_l1(p_disp, hf_disp),
             }
-            spectra[f"{label} {ratio}x"] = radial_power_spectrum(physical)
-            print(f"{ratio}x {label:24s} | L2 {row[label]['l2']:.4f} | "
-                  f"spectrum {row[label]['spectrum_log_l1']:.4f}")
+            extra = ""
+            if multi:
+                row[label]["l2_all_norm"] = l2_norm(pred, hf.cpu())
+                row[label]["per_channel"] = {
+                    lab: l2_norm(physical[:, c:c + 1], hf_phys[:, c:c + 1])
+                    for c, lab in enumerate(labels_ch)
+                }
+                extra = f" | L2-all(norm) {row[label]['l2_all_norm']:.4f}"
+            spectra[f"{label} {ratio}x"] = radial_power_spectrum(p_disp)
+            print(f"{ratio}x {label:24s} | L2[{labels_ch[disp]}] {row[label]['l2']:.4f} | "
+                  f"spectrum {row[label]['spectrum_log_l1']:.4f}{extra}")
         table[f"{ratio}x"] = row
         _qualitative(normalizer, hf, preds, ratio,
-                     results_dir / f"qualitative_{ratio}x.png")
+                     results_dir / f"qualitative_{ratio}x.png",
+                     disp=disp, disp_label=labels_ch[disp])
 
     with open(results_dir / "metrics.json", "w") as f:
         json.dump(table, f, indent=2)
@@ -105,9 +123,16 @@ def _payload(patch_dir, normalizer, n, cfg, device):
 
 
 def _validate_compatible(eval_cfg, model_cfg, label):
-    for section, key in (("patches", "size"), ("data", "variable")):
-        if eval_cfg.get(section, {}).get(key) != model_cfg.get(section, {}).get(key):
-            raise ValueError(f"{label} checkpoint {section}.{key} does not match eval config")
+    if (eval_cfg.get("patches", {}).get("size")
+            != model_cfg.get("patches", {}).get("size")):
+        raise ValueError(f"{label} checkpoint patches.size does not match eval config")
+
+    def _specs(cfg):
+        d = cfg.get("data", {})
+        return channel_labels(d) if (d.get("variables") or d.get("variable")) else None
+
+    if _specs(eval_cfg) != _specs(model_cfg):
+        raise ValueError(f"{label} checkpoint data channels do not match eval config")
 
 
 def _batched_bicubic(hf, ratio, batch):
@@ -129,17 +154,18 @@ def _batched_transport(hf, coords, batch, model, process, ratio, cfg, method, ar
     return torch.cat(outputs)
 
 
-def _qualitative(normalizer, hf, preds, ratio, path, idx=0):
+def _qualitative(normalizer, hf, preds, ratio, path, idx=0, disp=0, disp_label=""):
     panels = [(name, pred[idx:idx + 1]) for name, pred in preds.items()]
     panels.append(("Reference", hf[idx:idx + 1].cpu()))
-    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
+    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, disp].numpy()
     fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
     for ax, (title, tensor) in zip(axes, panels):
-        ax.imshow(normalizer.decode(tensor.cpu())[0, 0].numpy(), cmap="RdBu_r",
+        ax.imshow(normalizer.decode(tensor.cpu())[0, disp].numpy(), cmap="RdBu_r",
                   vmin=float(ref.min()), vmax=float(ref.max()))
         ax.set_title(title)
         ax.axis("off")
-    fig.suptitle(f"{ratio}x transport super-resolution")
+    chan = f" ({disp_label})" if disp_label else ""
+    fig.suptitle(f"{ratio}x transport super-resolution{chan}")
     fig.tight_layout()
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)

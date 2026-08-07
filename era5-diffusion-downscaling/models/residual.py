@@ -20,7 +20,7 @@ class ResidualConditionalUNet(nn.Module):
     """Noise predictor for residual diffusion.
 
     forward(x_t, t, cond) where cond = (mean_field, coords-or-None):
-      x_t: (B,1,H,W) noisy residual; mean_field: (B,1,H,W) the deterministic
+      x_t: (B,C,H,W) noisy residual; mean_field: (B,C,H,W) the deterministic
       mean prediction on the HF grid; coords: (B,H,W,d) for geo conditioning.
     The tuple-cond signature matches GaussianDiffusion.training_loss /
     sample_unconditional, which pass `cond` through to the model unchanged.
@@ -42,12 +42,13 @@ class ResidualConditionalUNet(nn.Module):
 
 def build_residual_model(cfg: dict) -> ResidualConditionalUNet:
     geo_on = cfg.get("geo", {}).get("enabled", False)
+    mean_channels = cfg["unet"]["in_channels"]  # mean field has one channel per variable
     if geo_on:
         from models.geo_encoding import build_geo_encoder
         geo_enc = build_geo_encoder(cfg)
-        extra = 1 + geo_enc.output_dim  # mean-field channel + embedding
+        extra = mean_channels + geo_enc.output_dim
     else:
         geo_enc = None
-        extra = 1
+        extra = mean_channels
     base = build_unet(cfg, use_time=True, extra_in_channels=extra)
     return ResidualConditionalUNet(base, geo_enc)

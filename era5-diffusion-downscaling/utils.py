@@ -42,7 +42,56 @@ def ensure_dir(path: str | os.PathLike) -> Path:
     return p
 
 
-_VAR_SHORT = {"2m_temperature": "t2m", "geopotential": "z500"}
+_VAR_SHORT = {
+    "2m_temperature": "t2m",
+    "10m_u_component_of_wind": "u10",
+    "10m_v_component_of_wind": "v10",
+    "mean_sea_level_pressure": "msl",
+    "surface_pressure": "sp",
+    "total_column_water_vapour": "tcwv",
+    "geopotential": "z",
+    "temperature": "t",
+    "u_component_of_wind": "u",
+    "v_component_of_wind": "v",
+    "specific_humidity": "q",
+    "vertical_velocity": "w",
+}
+
+
+def channel_specs(dcfg: dict) -> list[dict]:
+    """Per-channel {name, level} specs, in channel order.
+
+    Multi-channel configs list them under data.variables; a legacy config's
+    single data.variable/level becomes a one-element list."""
+    if dcfg.get("variables"):
+        return [{"name": v["name"], "level": v.get("level")} for v in dcfg["variables"]]
+    return [{"name": dcfg["variable"], "level": dcfg.get("level")}]
+
+
+def channel_label(name: str, level=None) -> str:
+    """Short channel label, e.g. 2m_temperature -> t2m, geopotential@500 -> z500."""
+    short = _VAR_SHORT.get(name, name)
+    return f"{short}{int(level)}" if level is not None else short
+
+
+def channel_labels(dcfg: dict) -> list[str]:
+    return [channel_label(s["name"], s["level"]) for s in channel_specs(dcfg)]
+
+
+def display_channel(cfg: dict) -> int:
+    """Channel index used for figures and headline (physical-unit) metrics."""
+    return int(cfg.get("eval", {}).get("display_channel", 0))
+
+
+def _var_tag(dcfg: dict) -> str:
+    """Short dataset tag: channel label for single-variable runs, data.name
+    (or '<C>ch') for multi-channel runs."""
+    specs = channel_specs(dcfg) if (dcfg.get("variables") or dcfg.get("variable")) else []
+    if len(specs) > 1:
+        return dcfg.get("name") or f"{len(specs)}ch"
+    if specs:
+        return channel_label(specs[0]["name"], specs[0]["level"])
+    return ""
 
 
 def run_name(cfg: dict, *parts: str) -> str:
@@ -52,9 +101,7 @@ def run_name(cfg: dict, *parts: str) -> str:
     encoder, mean type, and seed) plus any extra tags; empty parts are
     skipped. Example: run_name(cfg, 'diffusion_geo_hpx', 'resumed')
     -> 't2m-diffusion_geo_hpx-resumed'."""
-    var = cfg.get("data", {}).get("variable", "")
-    var = _VAR_SHORT.get(var, var)
-    return "-".join(p for p in (var, *parts) if p)
+    return "-".join(p for p in (_var_tag(cfg.get("data", {})), *parts) if p)
 
 
 def init_wandb(cfg: dict, job_type: str, extra_config: dict | None = None,
@@ -74,7 +121,7 @@ def init_wandb(cfg: dict, job_type: str, extra_config: dict | None = None,
     name = wcfg.get("name") or name
     if not name and "data" in cfg:
         geo_tag = "geo" if cfg.get("geo", {}).get("enabled") else "base"
-        name = f"{cfg['data']['variable']}-{geo_tag}-{job_type}"
+        name = f"{_var_tag(cfg['data'])}-{geo_tag}-{job_type}"
     run = wandb.init(
         project=wcfg.get("project", "era5-diffusion-downscaling"),
         entity=wcfg.get("entity"),

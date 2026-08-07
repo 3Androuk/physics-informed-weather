@@ -34,7 +34,8 @@ from sample.reconstruct import (load_diffusion, load_directmap,  # noqa: E402
                                 load_residual, reconstruct_bicubic,
                                 reconstruct_diffusion, reconstruct_directmap,
                                 reconstruct_residual)
-from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # noqa: E402
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   get_device, init_wandb, load_config, run_name)
 
 
 @torch.no_grad()
@@ -142,19 +143,24 @@ def main():
         ds = PatchDataset(patch_dir / "test_patches.npy", normalizer)
         hf = torch.stack([ds[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())                          # physical units
-    print(f"Evaluating on {n} test patches | geo={geo_on} | dm_geo={dm_geo}")
+    labels = channel_labels(cfg["data"])
+    disp = display_channel(cfg)
+    multi = len(labels) > 1
+    hf_disp = hf_phys[:, disp:disp + 1]  # figures + headline metrics channel
+    print(f"Evaluating on {n} test patches | channels={len(labels)} "
+          f"(display: {labels[disp]}) | geo={geo_on} | dm_geo={dm_geo}")
 
     eta = cfg["sample"]["ddim_eta"]
     table = {}
     ens_table = {}    # tag -> method -> ensemble metrics (only with --ensemble > 1)
     spectra = {}      # label -> (k, E)
     hists = {}        # label -> (centers, density)
-    vrange = (float(hf_phys.min()), float(hf_phys.max()))
+    vrange = (float(hf_disp.min()), float(hf_disp.max()))
 
-    # Reference spectrum / distribution.
-    k_ref, e_ref = radial_power_spectrum(hf_phys)
+    # Reference spectrum / distribution (display channel, physical units).
+    k_ref, e_ref = radial_power_spectrum(hf_disp)
     spectra["Reference"] = (k_ref, e_ref)
-    hists["Reference"] = value_histogram(hf_phys, cfg["eval"]["hist_bins"], vrange)
+    hists["Reference"] = value_histogram(hf_disp, cfg["eval"]["hist_bins"], vrange)
 
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]
@@ -203,14 +209,27 @@ def main():
         row = {}
         for name, p in preds.items():
             p_phys = normalizer.decode(p)
+            p_disp = p_phys[:, disp:disp + 1]
+            # Headline l2/spectrum: display channel in physical units (the
+            # single-channel behavior). Multi-channel runs additionally get an
+            # all-channel L2 in NORMALIZED units (physical units mix across
+            # variables) plus the per-channel physical breakdown.
             row[name] = {
-                "l2": l2_norm(p_phys, hf_phys),
-                "spectrum_log_l1": spectrum_log_l1(p_phys, hf_phys),
+                "l2": l2_norm(p_disp, hf_disp),
+                "spectrum_log_l1": spectrum_log_l1(p_disp, hf_disp),
             }
-            spectra[f"{name} {tag}"] = radial_power_spectrum(p_phys)
-            hists[f"{name} {tag}"] = value_histogram(p_phys, cfg["eval"]["hist_bins"], vrange)
-            print(f"  {name:11s} | L2 {row[name]['l2']:.4f} | "
-                  f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
+            extra = ""
+            if multi:
+                row[name]["l2_all_norm"] = l2_norm(p, hf.cpu())
+                row[name]["per_channel"] = {
+                    lab: l2_norm(p_phys[:, c:c + 1], hf_phys[:, c:c + 1])
+                    for c, lab in enumerate(labels)
+                }
+                extra = f" | L2-all(norm) {row[name]['l2_all_norm']:.4f}"
+            spectra[f"{name} {tag}"] = radial_power_spectrum(p_disp)
+            hists[f"{name} {tag}"] = value_histogram(p_disp, cfg["eval"]["hist_bins"], vrange)
+            print(f"  {name:11s} | L2[{labels[disp]}] {row[name]['l2']:.4f} | "
+                  f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}{extra}")
         table[tag] = row
 
         # ── Ensemble metrics for the STOCHASTIC methods only ───────────────
@@ -219,7 +238,7 @@ def main():
         if args.ensemble > 1:
             from eval.metrics import crps_ensemble  # noqa: PLC0415
             n_e = min(args.ensemble_patches, len(hf))
-            hf_e, hf_e_phys = hf[:n_e], hf_phys[:n_e]
+            hf_e, hf_e_phys = hf[:n_e], hf_disp[:n_e]  # ensemble scored on display channel
             c_e = None if coords is None else coords[:n_e]
 
             def _diff_draw(m):
@@ -257,7 +276,8 @@ def main():
                 draws["Residual"] = _res_draw
             print(f"  ensemble: {args.ensemble} members x {n_e} patches")
             for name, draw in draws.items():
-                members = [normalizer.decode(draw(m + 1)) for m in range(args.ensemble)]
+                members = [normalizer.decode(draw(m + 1))[:, disp:disp + 1]
+                           for m in range(args.ensemble)]
                 stack = torch.stack(members)
                 e = {
                     "single_l2": float(np.mean([l2_norm(m_, hf_e_phys) for m_ in members])),
@@ -270,11 +290,12 @@ def main():
                       f"ens-mean {e['ensemble_mean_l2']:.4f} | "
                       f"CRPS {e['crps']:.4f} | spread {e['spread']:.4f}")
 
-        _qualitative(normalizer, hf, preds, ratio, rc, results_dir)
+        _qualitative(normalizer, hf, preds, ratio, rc, results_dir,
+                     disp=disp, disp_label=labels[disp])
 
     _save_table(table, results_dir, ens_table)
     _plot_spectra(spectra, results_dir)
-    _plot_hists(hists, results_dir)
+    _plot_hists(hists, results_dir, labels[disp])
 
     wb_run, wandb = init_wandb(cfg, job_type="eval",
                                extra_config={"n_test_patches": n,
@@ -314,24 +335,26 @@ def main():
     print(f"\nAll outputs -> {results_dir}")
 
 
-def _qualitative(normalizer, hf, preds, ratio, rc, results_dir, idx=0):
+def _qualitative(normalizer, hf, preds, ratio, rc, results_dir, idx=0,
+                 disp=0, disp_label=""):
     """One panel per method actually evaluated, plus input and reference, all
-    on the reference's color scale."""
+    on the reference's color scale (display channel)."""
     lf = degrade(hf[idx:idx + 1].cpu(), ratio, rc.get("smooth_sigma", 0.0))
     panels = [("Input (LF)", lf)]
     for name in ("Bicubic", "Direct map", "Residual", "Diffusion"):
         if name in preds:
             panels.append((name, preds[name][idx:idx + 1]))
     panels.append(("Reference", hf[idx:idx + 1].cpu()))
-    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
+    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, disp].numpy()
     vmin, vmax = float(ref.min()), float(ref.max())
     fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
     for ax, (title, t) in zip(axes, panels):
-        ax.imshow(normalizer.decode(t)[0, 0].numpy(), cmap="RdBu_r",
+        ax.imshow(normalizer.decode(t)[0, disp].numpy(), cmap="RdBu_r",
                   vmin=vmin, vmax=vmax)
         ax.set_title(title)
         ax.axis("off")
-    fig.suptitle(f"{ratio}x reconstruction (shared color scale)")
+    chan = f", {disp_label}" if disp_label else ""
+    fig.suptitle(f"{ratio}x reconstruction (shared color scale{chan})")
     fig.tight_layout()
     fig.savefig(results_dir / f"qualitative_{ratio}x.png", dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -382,13 +405,13 @@ def _plot_spectra(spectra, results_dir):
     plt.close(fig)
 
 
-def _plot_hists(hists, results_dir):
+def _plot_hists(hists, results_dir, channel_label="value"):
     fig, ax = plt.subplots(figsize=(7, 5))
     for label, (c, d) in hists.items():
         style = "-" if label == "Reference" else "--"
         lw = 2.2 if label == "Reference" else 1.2
         ax.plot(c, d, style, lw=lw, label=label)
-    ax.set_xlabel("Z500 value")
+    ax.set_xlabel(f"{channel_label} value")
     ax.set_ylabel("density")
     ax.set_title("Value distribution")
     ax.legend(fontsize=8)

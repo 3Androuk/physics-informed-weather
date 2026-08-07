@@ -14,8 +14,11 @@ def _to_numpy(x) -> np.ndarray:
     if isinstance(x, torch.Tensor):
         x = x.detach().cpu().numpy()
     x = np.asarray(x, dtype=np.float64)
-    if x.ndim == 4:        # (N, C, H, W) -> assume single channel
-        x = x[:, 0]
+    if x.ndim == 4:        # (N, C, H, W) -> channels become samples (N*C, H, W).
+        # Identical to before for C == 1. Multi-channel callers wanting a
+        # single variable's metric slice the channel first (mixing channels is
+        # only meaningful in normalized units).
+        x = x.reshape(-1, *x.shape[-2:])
     elif x.ndim == 2:      # (H, W) -> (1, H, W)
         x = x[None]
     return x               # (N, H, W)
@@ -32,7 +35,7 @@ def radial_power_spectrum(fields):
     """Radially-averaged 2D power spectrum E(k).
 
     Args:
-        fields: (N, H, W) / (N, 1, H, W) / (H, W).
+        fields: (N, H, W) / (N, C, H, W) (channels pooled as samples) / (H, W).
     Returns:
         k: (kmax+1,) integer wavenumbers.
         E: (kmax+1,) spectrum averaged over samples.

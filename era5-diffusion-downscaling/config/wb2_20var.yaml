@@ -1,0 +1,150 @@
+# 20-variable WB2 downscaling — 20 input and 20 output channels.
+# t2m is channel 0 and the display channel for figures/headline metrics.
+# All paths are separate from the single-variable runs so neither data nor
+# checkpoints can clobber each other.
+
+seed: 42
+
+paths:
+  raw_dir: datasets/raw_wb220
+  patch_dir: datasets/patches_wb220
+  ckpt_dir: checkpoints_wb220
+  results_dir: results_wb220
+  log_dir: results_wb220/tb
+
+data:
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
+  gcs_token: anon
+  name: wb220                    # short tag for wandb run names
+  # 20 channels: 5 surface + {z, t, u, v, q} at 500/700/850 hPa. Channel order
+  # here is the channel order everywhere (patches, model, stats, metrics).
+  variables:
+    - {name: 2m_temperature, level: null}
+    - {name: 10m_u_component_of_wind, level: null}
+    - {name: 10m_v_component_of_wind, level: null}
+    - {name: mean_sea_level_pressure, level: null}
+    - {name: total_column_water_vapour, level: null}
+    - {name: geopotential, level: 500}
+    - {name: geopotential, level: 700}
+    - {name: geopotential, level: 850}
+    - {name: temperature, level: 500}
+    - {name: temperature, level: 700}
+    - {name: temperature, level: 850}
+    - {name: u_component_of_wind, level: 500}
+    - {name: u_component_of_wind, level: 700}
+    - {name: u_component_of_wind, level: 850}
+    - {name: v_component_of_wind, level: 500}
+    - {name: v_component_of_wind, level: 700}
+    - {name: v_component_of_wind, level: 850}
+    - {name: specific_humidity, level: 500}
+    - {name: specific_humidity, level: 700}
+    - {name: specific_humidity, level: 850}
+  train_years: [2007, 2015]
+  test_years: [2016, 2017]
+  time_stride: 4                 # every 24h at a fixed hour (avoids diurnal aliasing)
+
+patches:
+  size: 128
+  per_field: 8                   # NOTE: 20-channel train patches are ~35 GB on
+                                 # disk at this setting; halve per_field to halve it.
+  lat_range: [-60.0, 60.0]
+
+normalize:
+  method: zscore                 # per-CHANNEL mean/std computed on train patches
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: linear
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+
+transport:
+  train_ratios: [2, 4, 8]
+  eval_ratios: [4, 8, 16]        # 16x is held out during training
+  time_scale: 1000.0
+  time_epsilon: 1.0e-4
+  sample_steps: 100
+  solver: heun
+  projection: final
+  stochastic_interpolant:
+    gamma: 0.5
+    score_weight: 1.0
+    sampler: ode
+    stochasticity: 0.1
+
+unet:
+  in_channels: 20                # one channel per data.variables entry
+  out_channels: 20
+  base_channels: 64
+  channel_mults: [1, 2, 4, 8]
+  num_res_blocks: 2
+  time_emb_dim: 256
+  attn_resolutions: [16]
+  dropout: 0.1
+  groupnorm_groups: 32
+
+geo:
+  enabled: false
+  encoder: hash
+  healpix_n_levels: 8
+  healpix_nside_max: 128
+  input_dim: 3
+  n_levels: 8
+  n_features_per_level: 2
+  log2_hashmap_size: 19
+  base_resolution: 16
+  finest_resolution: 128
+  altitude: null
+
+residual:
+  train_ratios: [2, 4, 8]
+  n_steps: 100
+
+train:
+  batch_size: 8                  # 20 channels cost more activation memory than
+                                 # 1; start here and raise if the GPU has room
+  epochs: 200
+  lr: 2.0e-4
+  weight_decay: 0.0
+  grad_clip: 1.0
+  amp: false
+  ema_decay: 0.999
+  num_workers: 4
+  log_every: 50
+  val_patches: 256
+  ckpt_every_epochs: 1
+  sample_every_epochs: 10
+
+directmap:
+  train_ratio: 4
+  batch_size: 8
+  epochs: 200
+  lr: 2.0e-4
+  grad_clip: 1.0
+  amp: false
+
+sample:
+  ddim_eta: 0.0
+  guidance_strength: 0.0
+  interp: nearest
+  reconstructions:
+    - ratio: 4
+      K: 3
+      t_steps: [160, 114, 80]
+      smooth_sigma: 0.0
+    - ratio: 8
+      K: 1
+      t_steps: [320]
+      smooth_sigma: 5.0
+
+eval:
+  n_test_patches: 256
+  display_channel: 0             # t2m: figures + headline physical-unit metrics
+  spectrum_bins: null
+  hist_bins: 100
+
+wandb:
+  enabled: false
+  project: era5-diffusion-downscaling
+  entity: null
+  name: null

@@ -54,7 +54,7 @@ def build_transport_model(cfg: dict, method: str) -> ConditionalTransportUNet:
     else:
         geo_encoder, geo_channels = None, 0
 
-    # Current field + one LF conditioning channel + optional geo embedding.
+    # Current field + the C-channel LF conditioning + optional geo embedding.
     # Stochastic interpolants predict [velocity, scaled_score].
     model_cfg = {**cfg, "unet": dict(cfg["unet"])}
     model_cfg["unet"]["out_channels"] = (
@@ -62,7 +62,7 @@ def build_transport_model(cfg: dict, method: str) -> ConditionalTransportUNet:
         if method == "stochastic_interpolant" else cfg["unet"]["out_channels"]
     )
     base = build_unet(model_cfg, use_time=True,
-                      extra_in_channels=1 + geo_channels)
+                      extra_in_channels=cfg["unet"]["in_channels"] + geo_channels)
     return ConditionalTransportUNet(
         base, cfg.get("transport", {}).get("time_scale", 1000.0), geo_encoder
     )

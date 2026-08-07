@@ -22,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (display_channel, ensure_dir, get_device, init_wandb,  # noqa: E402
+                   load_config, run_name, set_seed)
 
 
 def main():
@@ -227,7 +227,8 @@ def main():
             fig_path = ensure_dir(cfg["paths"]["results_dir"]) / f"directmap_epoch{epoch:03d}.png"
             _save_recons(fwd, val_x[:2],
                          None if val_coords is None else val_coords[:2],
-                         normalizer, device, ratio, fig_path, model)
+                         normalizer, device, ratio, fig_path, model,
+                         disp=display_channel(cfg))
             import wandb as _wandb
             wb_run.log({"recons": _wandb.Image(str(fig_path))}, step=step)
 
@@ -248,9 +249,11 @@ def main():
 
 
 @torch.no_grad()
-def _save_recons(fwd, val_batch, val_coords, normalizer, device, ratio, path, model):
+def _save_recons(fwd, val_batch, val_coords, normalizer, device, ratio, path, model,
+                 disp=0):
     """Fixed val patches: input (train ratio), prediction at train ratio and at
-    8x, target — all on the target's color scale, comparable across epochs."""
+    8x, target — all on the target's color scale (display channel), comparable
+    across epochs."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -271,10 +274,10 @@ def _save_recons(fwd, val_batch, val_coords, normalizer, device, ratio, path, mo
     fig, axes = plt.subplots(len(panels), 4, figsize=(16, 4 * len(panels)))
     axes = axes.reshape(len(panels), 4)
     for r, row in enumerate(panels):
-        ref = normalizer.decode(row[-1][1].cpu())[0, 0].numpy()
+        ref = normalizer.decode(row[-1][1].cpu())[0, disp].numpy()
         vmin, vmax = float(ref.min()), float(ref.max())
         for ax, (title, t) in zip(axes[r], row):
-            ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
+            ax.imshow(normalizer.decode(t.cpu())[0, disp].numpy(), cmap="RdBu_r",
                       vmin=vmin, vmax=vmax)
             ax.set_title(title)
             ax.axis("off")

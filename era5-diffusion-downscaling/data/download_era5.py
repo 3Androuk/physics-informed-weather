@@ -1,8 +1,10 @@
-"""Stream ERA5 Z500 from the WeatherBench 2 public GCS store — resumable.
+"""Stream ERA5 variables from the WeatherBench 2 public GCS store — resumable.
 
-Downloads geopotential @ 500 hPa at 0.25 deg (721 x 1440), cropped to a
-mid-latitude band, for the configured train/test year ranges, and caches each
-split as a float32 .npy of shape (T, H, W). No credentials required.
+Downloads the configured variables (data.variables list, or the legacy single
+data.variable/level) at 0.25 deg (721 x 1440), cropped to a mid-latitude band,
+for the configured train/test year ranges, and caches each split as a float32
+.npy of shape (T, C, H, W) — one channel per variable, in config order. No
+credentials required.
 
 This store is 0.25 deg (1440x721) — ~36x more data per field than the 1.5 deg
 store the baselines use — so the download is large. Built to survive a slow /
@@ -35,11 +37,12 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils import ensure_dir, load_config  # noqa: E402
+from utils import channel_labels, channel_specs, ensure_dir, load_config  # noqa: E402
 
 
 def _open_da(dcfg, lat_range, timeout, chunk_time):
-    """Open the WB2 zarr and return the Z500 DataArray cropped to lat_range.
+    """Open the WB2 zarr and return the configured variables stacked along a
+    'channel' dim, cropped to lat_range: (time, channel, latitude, longitude).
 
     A fresh handle (fresh network session) is opened on every call, so a retry
     after a stall never reuses a broken connection. Small time-chunks keep each
@@ -59,10 +62,15 @@ def _open_da(dcfg, lat_range, timeout, chunk_time):
         ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": chunk_time},
                           storage_options=storage)
 
-    da = ds[dcfg["variable"]]
-    if dcfg.get("level") is not None:  # surface variables (e.g. 2m_temperature) have no level dim
-        da = da.sel(level=dcfg["level"])
-    da = da.transpose("time", "latitude", "longitude")
+    das = []
+    for spec in channel_specs(dcfg):
+        da = ds[spec["name"]]
+        if spec["level"] is not None:  # surface variables (e.g. 2m_temperature) have no level dim
+            da = da.sel(level=spec["level"])
+        das.append(da.reset_coords(drop=True))
+    da = xr.concat(das, dim="channel", coords="minimal", compat="override",
+                   combine_attrs="drop")
+    da = da.transpose("time", "channel", "latitude", "longitude")
     lat = da["latitude"].values
     lo, hi = lat_range
     da = da.isel(latitude=np.where((lat >= lo) & (lat <= hi))[0])
@@ -78,20 +86,21 @@ def _year_sub(da, year, stride):
 
 
 def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time, max_retries):
-    """Fetch one year in small batches -> (arr (T, H, W) float32, lat, lon).
+    """Fetch one year in small batches -> (arr (T, C, H, W) float32, lat, lon).
 
     Each batch of `batch` (strided) fields is read independently and retried on
     failure with a fresh connection, so a stall costs at most one batch.
     """
     da = _open_da(dcfg, lat_range, timeout, chunk_time)
     sub = _year_sub(da, year, stride)
-    T = int(sub.sizes["time"])
+    T, C = int(sub.sizes["time"]), int(sub.sizes["channel"])
     H, W = int(sub.sizes["latitude"]), int(sub.sizes["longitude"])
     lat, lon = da["latitude"].values, da["longitude"].values
 
-    out = np.empty((T, H, W), dtype=np.float32)
+    out = np.empty((T, C, H, W), dtype=np.float32)
     n_batches = (T + batch - 1) // batch
-    print(f"  {year}: {T} fields in {n_batches} batches of {batch} ...", flush=True)
+    print(f"  {year}: {T} fields x {C} channels in {n_batches} batches of {batch} ...",
+          flush=True)
 
     start = 0
     while start < T:
@@ -129,10 +138,10 @@ def _merge(cache_dir, split, years, out_path):
     files = [cache_dir / f"{split}_{y}.npy" for y in years]
     shapes = [np.load(f, mmap_mode="r").shape for f in files]
     total = sum(s[0] for s in shapes)
-    h, w = shapes[0][1], shapes[0][2]
+    rest = shapes[0][1:]   # (C, H, W) — or (H, W) for legacy single-channel caches
 
     tmp = out_path.with_suffix(".npy.tmp")
-    out = open_memmap(tmp, mode="w+", dtype=np.float32, shape=(total, h, w))
+    out = open_memmap(tmp, mode="w+", dtype=np.float32, shape=(total, *rest))
     i = 0
     for f, s in zip(files, shapes):
         a = np.load(f, mmap_mode="r")
@@ -142,11 +151,11 @@ def _merge(cache_dir, split, years, out_path):
     out.flush()
     del out
     tmp.replace(out_path)
-    return (total, h, w)
+    return (total, *rest)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Download ERA5 Z500 from WB2 GCS (resumable).")
+    ap = argparse.ArgumentParser(description="Download ERA5 variables from WB2 GCS (resumable).")
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--timeout", type=int, default=120,
                     help="per-request GCS read timeout in seconds (0 disables).")
@@ -170,7 +179,9 @@ def main():
     cache_dir = ensure_dir(Path(raw_dir) / "_years")
     coords_path = Path(raw_dir) / "coords.npz"
 
-    print(f"Opening {dcfg['era5_zarr']}\n  per-year | timeout={args.timeout}s | "
+    labels = channel_labels(dcfg)
+    print(f"Opening {dcfg['era5_zarr']}\n  channels ({len(labels)}): {', '.join(labels)}\n"
+          f"  per-year | timeout={args.timeout}s | "
           f"chunk_time={args.chunk_time} | batch={args.batch} | retries={args.max_retries}",
           flush=True)
 
@@ -198,12 +209,13 @@ def main():
             tmp.replace(ypath)
             print(f"[done] {split} {year}: {arr.shape} -> {ypath.name}", flush=True)
             if not coords_path.exists():
-                np.savez(coords_path, lat=lat, lon=lon)
+                np.savez(coords_path, lat=lat, lon=lon, channels=np.array(labels))
             del arr
 
     if not coords_path.exists():  # e.g. resumed run where every year was cached
         da = _open_da(dcfg, lat_range, args.timeout, args.chunk_time)
-        np.savez(coords_path, lat=da["latitude"].values, lon=da["longitude"].values)
+        np.savez(coords_path, lat=da["latitude"].values, lon=da["longitude"].values,
+                 channels=np.array(labels))
 
     # ── Merge per-year caches into train.npy / test.npy ───────────────────
     merged = {}
@@ -220,8 +232,8 @@ def main():
         except OSError:
             pass
 
-    h, w = merged["train"][1], merged["train"][2]
-    print(f"Done. grid {h}x{w} -> {raw_dir}", flush=True)
+    h, w = merged["train"][-2], merged["train"][-1]
+    print(f"Done. {len(labels)} channel(s), grid {h}x{w} -> {raw_dir}", flush=True)
 
 
 if __name__ == "__main__":

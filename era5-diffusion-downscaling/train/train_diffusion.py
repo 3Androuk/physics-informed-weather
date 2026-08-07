@@ -22,8 +22,8 @@ from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   get_device, init_wandb, load_config, run_name, set_seed)
 
 
 def main():
@@ -266,7 +266,9 @@ def main():
             # are nearly blind to spectral defects (speckle = excess high-k
             # energy), so track it explicitly across training.
             if _spec_ref is not None:
-                spec_err = spectrum_log_l1(samples_phys, _spec_ref)
+                disp = display_channel(cfg)
+                spec_err = spectrum_log_l1(samples_phys[:, disp:disp + 1],
+                                           _spec_ref[:, disp:disp + 1])
                 print(f"  samples spectrum_log_l1 vs train patches: {spec_err:.4f}")
                 if writer:
                     writer.add_scalar("samples/spectrum_log_l1", spec_err, step)
@@ -347,15 +349,18 @@ def _save_samples(diffusion, model, normalizer, device, path, cfg, cond=None):
     import matplotlib.pyplot as plt
 
     size = cfg["patches"]["size"]
-    samples = diffusion.sample_unconditional(model, (4, 1, size, size), device,
+    channels = cfg["unet"]["out_channels"]
+    disp = display_channel(cfg)
+    disp_label = channel_labels(cfg["data"])[disp]
+    samples = diffusion.sample_unconditional(model, (4, channels, size, size), device,
                                              n_steps=100, cond=cond)
     samples = normalizer.decode(samples.cpu()).numpy()
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
     for ax, s in zip(axes, samples):
-        ax.imshow(s[0], cmap="RdBu_r")
+        ax.imshow(s[disp], cmap="RdBu_r")
         ax.axis("off")
     mode = "Geo-conditioned (fixed locations)" if cond is not None else "Unconditional"
-    fig.suptitle(f"{mode} diffusion samples ({cfg['data']['variable']})")
+    fig.suptitle(f"{mode} diffusion samples ({disp_label})")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)

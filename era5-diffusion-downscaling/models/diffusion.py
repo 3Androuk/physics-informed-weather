@@ -102,7 +102,7 @@ class GaussianDiffusion(nn.Module):
 
         Args:
             model: trained noise predictor eps_theta(x_t, t).
-            x_guidance: (N, 1, H, W) low-fidelity guidance x^(g), already
+            x_guidance: (N, C, H, W) low-fidelity guidance x^(g), already
                 normalized and on the HF grid (nearest-upsampled, optionally
                 smoothed). The SAME model/guidance handles any ratio.
             t_steps: list of per-outer-loop start timesteps (len == K). Each is
@@ -113,7 +113,7 @@ class GaussianDiffusion(nn.Module):
             stride: take every `stride`-th timestep in the subsequence.
 
         Returns:
-            (N, 1, H, W) reconstructed field (normalized units).
+            (N, C, H, W) reconstructed field (normalized units).
         """
         assert len(t_steps) == K, "t_steps must have one entry per outer loop K"
         if project:
