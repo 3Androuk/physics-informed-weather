@@ -63,8 +63,15 @@ class AttnBlock(nn.Module):
         q = q.reshape(n, c, h * w).permute(0, 2, 1)   # (N, HW, C)
         k = k.reshape(n, c, h * w)                     # (N, C, HW)
         v = v.reshape(n, c, h * w).permute(0, 2, 1)    # (N, HW, C)
-        attn = torch.softmax(torch.bmm(q, k) * self.scale, dim=-1)  # (N, HW, HW)
-        out = torch.bmm(attn, v).permute(0, 2, 1).reshape(n, c, h, w)
+        if hasattr(F, "scaled_dot_product_attention"):
+            # Same math as the explicit softmax(QK^T/sqrt(C))V below, but never
+            # materializes the (HW, HW) matrix — required for full-field
+            # inference, where HW is ~10k tokens instead of 256.
+            out = F.scaled_dot_product_attention(q, k.permute(0, 2, 1), v)
+        else:
+            attn = torch.softmax(torch.bmm(q, k) * self.scale, dim=-1)  # (N, HW, HW)
+            out = torch.bmm(attn, v)
+        out = out.permute(0, 2, 1).reshape(n, c, h, w)
         return x + self.proj(out)
 
 
