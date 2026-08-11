@@ -43,7 +43,8 @@ from sample.full_field import (crop_to_multiple,  # noqa: E402
                                reconstruct_full_tiled_transport)
 from sample.reconstruct import load_diffusion, load_directmap  # noqa: E402
 from sample.transport import load_transport  # noqa: E402
-from utils import ensure_dir, get_device, load_config  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   run_name)
 
 
 def main():
@@ -64,9 +65,13 @@ def main():
                     help="skip the final global data-consistency projection (tiled)")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed for the shared global noise fields")
+    ap.add_argument("--wandb", action="store_true",
+                    help="Enable wandb logging (overrides config wandb.enabled).")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.wandb:
+        cfg.setdefault("wandb", {})["enabled"] = True
     device = get_device()
     patch_dir = Path(cfg["paths"]["patch_dir"])
     ckpt_dir = Path(cfg["paths"]["ckpt_dir"])
@@ -94,11 +99,14 @@ def main():
 
     # ── Load whichever checkpoints exist ──────────────────────────────────
     methods = {}   # name -> ("diffusion"|"transport"|"directmap", payload)
+    stems = []     # loaded checkpoint stems (identify the run, e.g. in wandb)
     p = ckpt_dir / args.ckpt
     if p.exists():
         model, diffusion, cfg_ck = load_diffusion(p, device)
         methods["Diffusion"] = ("diffusion", (model, diffusion),
                                 _geo_full(cfg_ck, patch_dir, hf_all.shape[-2:], device))
+        stems.append(p.stem)
+        print(f"  Diffusion checkpoint: {p} (epoch {_epoch_of(p)})")
     for label, name in (("Flow matching", args.flow_ckpt),
                         ("Stochastic interpolant", args.si_ckpt)):
         p = ckpt_dir / name
@@ -106,11 +114,15 @@ def main():
             model, process, cfg_ck, method = load_transport(p, device)
             methods[label] = ("transport", (model, process, cfg_ck, method),
                               _geo_full(cfg_ck, patch_dir, hf_all.shape[-2:], device))
+            stems.append(p.stem)
+            print(f"  {label} checkpoint: {p} (epoch {_epoch_of(p)})")
     p = ckpt_dir / args.dm_ckpt
     if p.exists():
         model, cfg_ck = load_directmap(p, device)
         methods["Direct map"] = ("directmap", (model,),
                                  _geo_full(cfg_ck, patch_dir, hf_all.shape[-2:], device))
+        stems.append(p.stem)
+        print(f"  Direct map checkpoint: {p} (epoch {_epoch_of(p)})")
     if not methods:
         raise FileNotFoundError(f"no checkpoints found in {ckpt_dir}")
     print(f"methods: {', '.join(methods)} + Bicubic")
@@ -161,6 +173,32 @@ def main():
     with open(results_dir / "metrics.json", "w") as f:
         json.dump(table, f, indent=2)
     print(f"\nOutputs -> {results_dir}")
+
+    # ── wandb (opt-in): one-shot eval -> summary scalars + figures ─────────
+    wb_run, wandb = init_wandb(
+        cfg, job_type="eval_full_field",
+        extra_config={"n_fields": n_fields, "tile": tile, "overlap": args.overlap,
+                      "modes": args.modes, "checkpoints": stems},
+        name=run_name(cfg, "fullfield", *stems,
+                      "noproj" if args.no_project else ""))
+    if wb_run is not None:
+        tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1",
+                                   "seconds_per_field"])
+        for tag, row in table.items():
+            for key, v in row.items():
+                tbl.add_data(tag, key, v["l2"], v["spectrum_log_l1"],
+                             v["seconds_per_field"])
+                skey = key.lower().replace(" ", "_").replace("(", "").replace(")", "")
+                wb_run.summary[f"{tag}/{skey}/l2"] = v["l2"]
+                wb_run.summary[f"{tag}/{skey}/spectrum_log_l1"] = v["spectrum_log_l1"]
+        log = {"eval/full_field_table": tbl}
+        for tag in table:
+            fig_path = results_dir / f"full_{tag}.png"
+            if fig_path.exists():
+                log[f"eval/full_{tag}"] = wandb.Image(str(fig_path))
+        wb_run.log(log)
+        wb_run.finish()
+        print("wandb: full-field eval logged")
 
 
 @torch.no_grad()
@@ -231,6 +269,15 @@ def _geo_full(cfg_ck, patch_dir, hw, device):
 def _geo_batched(geo):
     """Add the batch dim for a single-field direct pass."""
     return None if geo is None else geo[None]
+
+
+def _epoch_of(ckpt_path):
+    """Epoch counter stored in a checkpoint, for run identification."""
+    try:
+        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        return ck.get("epoch", "?")
+    except Exception:  # noqa: BLE001 - identification only, never fatal
+        return "?"
 
 
 def _score(sums, panels, name, mode, rec, hf_phys, normalizer, seconds, field_idx):
