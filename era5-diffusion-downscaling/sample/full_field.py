@@ -113,11 +113,14 @@ def stitch_tiles(fn, lf_full: torch.Tensor, tile: int, overlap: int,
     cols = tile_origins(w, tile, tile - overlap, align)
     origins = [(r, c) for r in rows for c in cols]
     win = blend_window(tile, overlap, lf_full.device, lf_full.dtype)[0]  # (1, t, t)
-    out = torch.zeros_like(lf_full)
+    out = None  # allocated from the first predictions (channels may differ, e.g. SI's 2C)
     wsum = torch.zeros(1, 1, h, w, device=lf_full.device, dtype=lf_full.dtype)
     for i in range(0, len(origins), batch):
         chunk = origins[i:i + batch]
         recs = fn(chunk)
+        if out is None:
+            out = torch.zeros(1, recs.shape[1], h, w,
+                              device=recs.device, dtype=recs.dtype)
         for (r, c), rec in zip(chunk, recs):
             out[0, :, r:r + tile, c:c + tile] += rec * win
             wsum[0, :, r:r + tile, c:c + tile] += win
@@ -198,6 +201,100 @@ def reconstruct_full_tiled_transport(model, process, lf_full, coarse_full, ratio
         return process.sample(model, lows, coords=coords, noise=noise, **kw)
 
     out = stitch_tiles(fn, lf_full, tile, overlap, align=ratio, batch=batch)
+    return _project_final(out, coarse_full, ratio) if project_final else out
+
+
+class _FusedTileModel:
+    """MultiDiffusion-style per-step fusion wrapper (Bar-Tal et al., ICML 2023).
+
+    Wraps a patch model so that ONE forward pass on a FULL field evaluates all
+    overlapping tiles of the current state and blends their predictions with
+    the stitching window. Plugged into the unchanged global sampling loops
+    (guided DDIM / probability-flow ODE / SDE), this binds every tile to a
+    single shared trajectory: the fusion happens at every step, not once at
+    the end, so tiles cannot drift apart and no seams can form.
+
+    Handles the three calling conventions of this codebase:
+      model(x, t)                      plain diffusion UNet
+      model(x, t, coords)              geo-conditioned UNet (coords cropped here)
+      model(x, t, (low_res, coords))   transport UNet (low_res cropped from cond)
+    """
+
+    def __init__(self, model, tile, overlap, align, batch, geo_full=None):
+        self.model = model
+        self.tile, self.overlap = tile, overlap
+        self.align, self.batch = align, batch
+        self.geo_full = geo_full
+
+    def __call__(self, x, t, cond=None):
+        lf_full = cond[0] if isinstance(cond, (tuple, list)) else None
+
+        def fn(origins):
+            xt = crop_tiles(x, origins, self.tile)
+            tb = t[:1].expand(len(origins))
+            coords = crop_geo_tiles(self.geo_full, origins, self.tile)
+            if lf_full is not None:
+                lows = crop_tiles(lf_full, origins, self.tile)
+                return self.model(xt, tb, (lows, coords))
+            if coords is not None:
+                return self.model(xt, tb, coords)
+            return self.model(xt, tb)
+
+        return stitch_tiles(fn, x, self.tile, self.overlap, self.align, self.batch)
+
+
+@torch.no_grad()
+def reconstruct_full_fused_diffusion(diffusion, model, lf_full, coarse_full, ratio,
+                                     recon_cfg, eta=0.0, tile=128, overlap=32,
+                                     batch=8, geo_full=None, project_steps=False,
+                                     project_final=True, generator=None):
+    """MultiDiffusion-fused guided reconstruction of one full field.
+
+    A single global DDIM chain runs on the full field; every noise prediction
+    is fused from overlapping tile evaluations (_FusedTileModel), and the
+    per-step ILVR projection (project_steps) acts globally. Compute cost
+    matches the tiled mode (all tiles, every step) — only the fusion point
+    moves from the end of the chain into every step."""
+    K = int(recon_cfg["K"])
+    fused = _FusedTileModel(model, tile, overlap, align=ratio, batch=batch,
+                            geo_full=geo_full)
+    init_noise = _global_noise((K, *lf_full.shape), lf_full, generator)
+    out = diffusion.guided_reconstruct(
+        fused, lf_full, t_steps=recon_cfg["t_steps"], K=K, eta=eta,
+        project=project_steps, lf=coarse_full if project_steps else None,
+        ratio=ratio if project_steps else None, init_noise=init_noise)
+    return _project_final(out, coarse_full, ratio) if project_final else out
+
+
+@torch.no_grad()
+def reconstruct_full_fused_transport(model, process, lf_full, coarse_full, ratio,
+                                     cfg, method, tile=128, overlap=32, batch=8,
+                                     geo_full=None, steps=None, solver=None,
+                                     sampler=None, stochasticity=None,
+                                     project_final=True, project_each=False,
+                                     generator=None):
+    """MultiDiffusion-fused flow-matching / stochastic-interpolant
+    reconstruction: a single global ODE/SDE state, velocity (and score) fused
+    from overlapping tile evaluations at every integration step; any per-step
+    or final projection acts globally."""
+    tc = cfg.get("transport", {})
+    fused = _FusedTileModel(model, tile, overlap, align=ratio, batch=batch,
+                            geo_full=geo_full)
+    noise = _global_noise(lf_full.shape, lf_full, generator)
+    kwargs = dict(
+        steps=tc.get("sample_steps", 100) if steps is None else steps,
+        solver=tc.get("solver", "heun") if solver is None else solver,
+        project="each" if project_each else "none",
+        coarse=coarse_full if project_each else None,
+        ratio=ratio if project_each else None,
+        noise=noise,
+    )
+    if method == "stochastic_interpolant":
+        si = tc.get("stochastic_interpolant", {})
+        kwargs.update(sampler=si.get("sampler", "ode") if sampler is None else sampler,
+                      stochasticity=(si.get("stochasticity", 0.1)
+                                     if stochasticity is None else stochasticity))
+    out = process.sample(fused, lf_full, coords=None, **kwargs)
     return _project_final(out, coarse_full, ratio) if project_final else out
 
 
