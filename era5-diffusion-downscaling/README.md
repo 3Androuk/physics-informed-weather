@@ -88,6 +88,36 @@ Note the 20-channel dataset is ~20x the single-variable footprint (the default
 patch settings produce ~35 GB of training patches; patches are streamed to an
 on-disk memmap, never held in RAM — reduce `patches.per_field` to shrink it).
 
+## Full-field reconstruction
+
+The models train on 128×128 patches but reconstruct **whole test fields**
+(the full lat-band grid) two ways, compared by `eval/full_field.py`:
+
+- **Direct** — the fully-convolutional UNet consumes the entire field at once.
+  The bottleneck self-attention now runs memory-efficiently
+  (`F.scaled_dot_product_attention`, mathematically identical to the explicit
+  softmax, no retraining needed), but it sees ~40× more tokens than at
+  training time — this mode measures whether that mismatch hurts.
+- **Tiled** — overlapping training-sized tiles blended with a smooth cosine
+  window (`sample/full_field.py`). Three details make the stitching seam-free
+  and physically consistent: tile origins are snapped to multiples of the
+  ratio so each tile's coarse observation is an exact crop of the global one;
+  every stochastic sampler starts from crops of ONE global noise field, so
+  overlapping tiles agree where they overlap; and a final exact block-average
+  projection re-pins the stitched field to the observed coarse input globally.
+
+```bash
+python -m eval.full_field --config config/t2m.yaml --n-fields 4
+# fewer/more tiles overlap, skip direct mode on small GPUs:
+python -m eval.full_field --config config/t2m.yaml --overlap 48 --modes tiled
+```
+
+Reports L2 + spectrum error and runtime per method (diffusion, flow matching,
+stochastic interpolant, direct map, bicubic) and mode, with full-field
+comparison figures under `results/full_field/`. In multi-channel runs the
+figures and headline metrics use the display channel (`eval.display_channel`),
+with the all-channel normalized L2 alongside in the JSON.
+
 ## Data
 
 ERA5 fields are streamed from the **WeatherBench 2 public GCS** Zarr store

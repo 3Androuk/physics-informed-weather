@@ -98,9 +98,10 @@ class FlowMatching:
     @torch.no_grad()
     def sample(self, model: nn.Module, low_res: torch.Tensor, coords=None,
                steps: int = 100, solver: str = "heun", project: str = "none",
-               coarse: torch.Tensor | None = None, ratio: int | None = None):
+               coarse: torch.Tensor | None = None, ratio: int | None = None,
+               noise: torch.Tensor | None = None):
         return integrate_transport(model, low_res, coords, steps, solver,
-                                   project, coarse, ratio)
+                                   project, coarse, ratio, noise=noise)
 
 
 class StochasticInterpolant:
@@ -158,21 +159,26 @@ class StochasticInterpolant:
     def sample(self, model: nn.Module, low_res: torch.Tensor, coords=None,
                steps: int = 100, solver: str = "heun", sampler: str = "ode",
                stochasticity: float = 0.1, project: str = "none",
-               coarse: torch.Tensor | None = None, ratio: int | None = None):
+               coarse: torch.Tensor | None = None, ratio: int | None = None,
+               noise: torch.Tensor | None = None):
         if sampler == "ode":
             return integrate_transport(model, low_res, coords, steps, solver,
-                                       project, coarse, ratio, split_velocity=True)
+                                       project, coarse, ratio, split_velocity=True,
+                                       noise=noise)
         if sampler != "sde":
             raise ValueError("sampler must be 'ode' or 'sde'")
         return self._sample_sde(model, low_res, coords, steps, stochasticity,
-                                project, coarse, ratio)
+                                project, coarse, ratio, noise)
 
     def _sample_sde(self, model, low_res, coords, steps, stochasticity,
-                    project, coarse, ratio):
+                    project, coarse, ratio, noise=None):
         _validate_sampling(steps, "euler", project, coarse, ratio)
         if stochasticity < 0:
             raise ValueError("stochasticity must be non-negative")
-        x = torch.randn_like(low_res)
+        # Only the INITIAL state is shareable across overlapping tiles; the
+        # per-step dW increments stay independent (overlap-blending averages
+        # the residual disagreement).
+        x = _initial_noise(low_res, noise)
         dt = 1.0 / steps
         for i in range(steps):
             t_value = i / steps
@@ -209,14 +215,26 @@ def _validate_sampling(steps, solver, project, coarse, ratio):
         raise ValueError("data-consistency projection needs coarse and ratio")
 
 
+def _initial_noise(low_res: torch.Tensor, noise: torch.Tensor | None) -> torch.Tensor:
+    """Fresh Gaussian noise, or a caller-supplied field (e.g. tiles cropped
+    from one global noise field so overlapping tiles agree)."""
+    if noise is None:
+        return torch.randn_like(low_res)
+    if noise.shape != low_res.shape:
+        raise ValueError(f"noise shape {tuple(noise.shape)} != input shape "
+                         f"{tuple(low_res.shape)}")
+    return noise.to(device=low_res.device, dtype=low_res.dtype)
+
+
 @torch.no_grad()
 def integrate_transport(model: nn.Module, low_res: torch.Tensor, coords=None,
                         steps: int = 100, solver: str = "heun",
                         project: str = "none", coarse=None, ratio=None,
-                        split_velocity: bool = False):
+                        split_velocity: bool = False,
+                        noise: torch.Tensor | None = None):
     """Euler/Heun integration of a learned probability-flow ODE, t=0 -> 1."""
     _validate_sampling(steps, solver, project, coarse, ratio)
-    x = torch.randn_like(low_res)
+    x = _initial_noise(low_res, noise)
     dt = 1.0 / steps
     cond = (low_res, coords)
     for i in range(steps):
