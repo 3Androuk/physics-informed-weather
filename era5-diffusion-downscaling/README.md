@@ -198,8 +198,44 @@ Headline table: rows `{4× in-dist, 8× out-of-dist}` × columns
   (quasi-geostrophic / barotropic vorticity on 500 hPa) — a future ablation.
 - Multiple variables (Z500 → T850, wind); sparse-reconstruction task.
 
-## Reference
-Shu, D., Li, Z., Barati Farimani, A. (2023). *A physics-informed diffusion model
-for high-fidelity flow field reconstruction.* J. Comput. Phys. 478, 111972.
-https://doi.org/10.1016/j.jcp.2023.111972 — original code:
-https://github.com/BaratiLab/Diffusion-based-Fluid-Super-resolution
+## References
+
+**Core method (reimplemented here):**
+- Shu, D., Li, Z., Barati Farimani, A. (2023). *A physics-informed diffusion
+  model for high-fidelity flow field reconstruction.* J. Comput. Phys. 478,
+  111972. https://doi.org/10.1016/j.jcp.2023.111972 — original code:
+  https://github.com/BaratiLab/Diffusion-based-Fluid-Super-resolution
+- Ho, J., Jain, A., Abbeel, P. (2020). *Denoising Diffusion Probabilistic
+  Models.* NeurIPS. https://arxiv.org/abs/2006.11239
+- Song, J., Meng, C., Ermon, S. (2021). *Denoising Diffusion Implicit Models.*
+  ICLR. https://arxiv.org/abs/2010.02502
+
+**Conditional transport models:**
+- Lipman, Y., Chen, R.T.Q., Ben-Hamu, H., Nickel, M., Le, M. (2023). *Flow
+  Matching for Generative Modeling.* ICLR. https://arxiv.org/abs/2210.02747
+- Albergo, M.S., Boffi, N.M., Vanden-Eijnden, E. (2023). *Stochastic
+  Interpolants: A Unifying Framework for Flows and Diffusions.*
+  https://arxiv.org/abs/2303.08797
+
+**Residual (split-model) diffusion:**
+- Mardani, M., et al. (2025). *Residual corrective diffusion modeling for
+  km-scale atmospheric downscaling* (CorrDiff). Communications Earth &
+  Environment. https://doi.org/10.1038/s43247-025-02042-5
+
+**Full-field reconstruction (fused tiled sampling):**
+- Bar-Tal, O., Yariv, L., Lipman, Y., Dekel, T. (2023). *MultiDiffusion:
+  Fusing Diffusion Paths for Controlled Image Generation.* ICML, PMLR 202.
+  https://proceedings.mlr.press/v202/bar-tal23a.html
+
+**Geographic conditioning:**
+- Müller, T., Evans, A., Schied, C., Keller, A. (2022). *Instant Neural
+  Graphics Primitives with a Multiresolution Hash Encoding* (Instant-NGP).
+  ACM TOG 41(4). https://arxiv.org/abs/2201.05989
+- Górski, K.M., et al. (2005). *HEALPix: A Framework for High-Resolution
+  Discretization and Fast Analysis of Data Distributed on the Sphere.*
+  ApJ 622, 759. https://arxiv.org/abs/astro-ph/0409513
+
+**Data:**
+- Rasp, S., et al. (2024). *WeatherBench 2: A Benchmark for the Next
+  Generation of Data-Driven Global Weather Models.* JAMES.
+  https://doi.org/10.1029/2023MS004019
