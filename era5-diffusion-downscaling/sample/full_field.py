@@ -163,16 +163,22 @@ def reconstruct_full_tiled_transport(model, process, lf_full, coarse_full, ratio
                                      cfg, method, tile=128, overlap=32, batch=8,
                                      geo_full=None, steps=None, solver=None,
                                      sampler=None, stochasticity=None,
-                                     project_final=True, generator=None):
+                                     project_final=True, project_each=False,
+                                     generator=None):
     """Tiled flow-matching / stochastic-interpolant reconstruction of one full
     field. Every tile's ODE/SDE starts from a crop of one global noise field,
-    so deterministic samplers agree exactly where tiles overlap."""
+    so deterministic samplers agree exactly where tiles overlap.
+
+    project_each=True additionally projects every integration step inside every
+    tile onto its crop of the SHARED coarse observation — anchoring all tiles'
+    low frequencies to the same field throughout, so neighboring tiles cannot
+    drift apart (visible as tile-scale squares at weakly-constrained ratios)."""
     tc = cfg.get("transport", {})
     noise_full = _global_noise(lf_full.shape, lf_full, generator)
     kwargs = dict(
         steps=tc.get("sample_steps", 100) if steps is None else steps,
         solver=tc.get("solver", "heun") if solver is None else solver,
-        project="none",  # consistency is enforced globally after stitching
+        project="none",  # global consistency is enforced after stitching
     )
     if method == "stochastic_interpolant":
         si = tc.get("stochastic_interpolant", {})
@@ -184,7 +190,12 @@ def reconstruct_full_tiled_transport(model, process, lf_full, coarse_full, ratio
         lows = crop_tiles(lf_full, origins, tile)
         coords = crop_geo_tiles(geo_full, origins, tile)
         noise = crop_tiles(noise_full, origins, tile)
-        return process.sample(model, lows, coords=coords, noise=noise, **kwargs)
+        kw = dict(kwargs)
+        if project_each:
+            kw.update(project="each",
+                      coarse=_crop_coarse(coarse_full, origins, tile, ratio),
+                      ratio=ratio)
+        return process.sample(model, lows, coords=coords, noise=noise, **kw)
 
     out = stitch_tiles(fn, lf_full, tile, overlap, align=ratio, batch=batch)
     return _project_final(out, coarse_full, ratio) if project_final else out

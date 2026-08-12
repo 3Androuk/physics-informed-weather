@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import load_norm_stats  # noqa: E402
 from data.degrade import coarsen, degrade  # noqa: E402
 from eval.metrics import l2_norm, spectrum_log_l1  # noqa: E402
-from sample.full_field import (crop_to_multiple,  # noqa: E402
+from sample.full_field import (_project_final, crop_to_multiple,  # noqa: E402
                                reconstruct_full_tiled_diffusion,
                                reconstruct_full_tiled_directmap,
                                reconstruct_full_tiled_transport)
@@ -63,6 +63,11 @@ def main():
                     default=["direct", "tiled"])
     ap.add_argument("--no-project", action="store_true",
                     help="skip the final global data-consistency projection (tiled)")
+    ap.add_argument("--project-steps", action="store_true",
+                    help="per-step data-consistency projection INSIDE every tile "
+                         "(and in direct mode): anchors all tiles' low frequencies "
+                         "to the shared observation throughout sampling, "
+                         "suppressing tile-scale seams at weak ratios (e.g. 8x)")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed for the shared global noise fields")
     ap.add_argument("--wandb", action="store_true",
@@ -180,6 +185,7 @@ def main():
         extra_config={"n_fields": n_fields, "tile": tile, "overlap": args.overlap,
                       "modes": args.modes, "checkpoints": stems},
         name=run_name(cfg, "fullfield", *stems,
+                      "projsteps" if args.project_steps else "",
                       "noproj" if args.no_project else ""))
     if wb_run is not None:
         tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1",
@@ -210,12 +216,15 @@ def _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse, ratio, rc, eta,
         model, diffusion = payload
         if mode == "direct":
             cond = _geo_batched(geo)
-            return diffusion.guided_reconstruct(model, lf, t_steps=rc["t_steps"],
-                                                K=rc["K"], eta=eta, cond=cond)
+            rec = diffusion.guided_reconstruct(
+                model, lf, t_steps=rc["t_steps"], K=rc["K"], eta=eta, cond=cond,
+                project=args.project_steps, lf=coarse if args.project_steps else None,
+                ratio=ratio if args.project_steps else None)
+            return _project_final(rec, coarse, ratio) if project else rec
         return reconstruct_full_tiled_diffusion(
             diffusion, model, lf, coarse, ratio, rc, eta=eta, tile=tile,
             overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
-            project_final=project, generator=gen)
+            project_steps=args.project_steps, project_final=project, generator=gen)
     if kind == "transport":
         model, process, cfg_ck, method = payload
         tc = cfg_ck.get("transport", {})
@@ -233,7 +242,7 @@ def _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse, ratio, rc, eta,
         return reconstruct_full_tiled_transport(
             model, process, lf_plain, coarse, ratio, cfg_ck, method, tile=tile,
             overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
-            project_final=project, generator=gen)
+            project_final=project, project_each=args.project_steps, generator=gen)
     if kind == "directmap":
         (model,) = payload
         if mode == "direct":
