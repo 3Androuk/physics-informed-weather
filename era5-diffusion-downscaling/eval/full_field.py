@@ -38,6 +38,8 @@ from data.dataset import load_norm_stats  # noqa: E402
 from data.degrade import coarsen, degrade  # noqa: E402
 from eval.metrics import l2_norm, spectrum_log_l1  # noqa: E402
 from sample.full_field import (_project_final, crop_to_multiple,  # noqa: E402
+                               reconstruct_full_fused_diffusion,
+                               reconstruct_full_fused_transport,
                                reconstruct_full_tiled_diffusion,
                                reconstruct_full_tiled_directmap,
                                reconstruct_full_tiled_transport)
@@ -59,8 +61,12 @@ def main():
     ap.add_argument("--tile", type=int, default=None, help="tile size (default: patches.size)")
     ap.add_argument("--overlap", type=int, default=32)
     ap.add_argument("--batch-tiles", type=int, default=8)
-    ap.add_argument("--modes", nargs="+", choices=["direct", "tiled"],
-                    default=["direct", "tiled"])
+    ap.add_argument("--modes", nargs="+", choices=["direct", "tiled", "fused"],
+                    default=["direct", "tiled"],
+                    help="fused = MultiDiffusion-style per-step tile fusion "
+                         "(Bar-Tal et al., ICML 2023): one global chain, tile "
+                         "predictions blended at EVERY step — seam-free by "
+                         "construction, same compute as tiled")
     ap.add_argument("--no-project", action="store_true",
                     help="skip the final global data-consistency projection (tiled)")
     ap.add_argument("--project-steps", action="store_true",
@@ -234,6 +240,12 @@ def _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse, ratio, rc, eta,
                 project=args.project_steps, lf=coarse if args.project_steps else None,
                 ratio=ratio if args.project_steps else None)
             return _project_final(rec, coarse, ratio) if project else rec
+        if mode == "fused":
+            return reconstruct_full_fused_diffusion(
+                diffusion, model, lf, coarse, ratio, rc, eta=eta, tile=tile,
+                overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
+                project_steps=args.project_steps, project_final=project,
+                generator=gen)
         return reconstruct_full_tiled_diffusion(
             diffusion, model, lf, coarse, ratio, rc, eta=eta, tile=tile,
             overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
@@ -252,6 +264,12 @@ def _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse, ratio, rc, eta,
                 kwargs.update(sampler=si.get("sampler", "ode"),
                               stochasticity=si.get("stochasticity", 0.1))
             return process.sample(model, lf_plain, **kwargs)
+        if mode == "fused":
+            return reconstruct_full_fused_transport(
+                model, process, lf_plain, coarse, ratio, cfg_ck, method, tile=tile,
+                overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
+                project_final=project, project_each=args.project_steps,
+                generator=gen)
         return reconstruct_full_tiled_transport(
             model, process, lf_plain, coarse, ratio, cfg_ck, method, tile=tile,
             overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
@@ -261,6 +279,8 @@ def _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse, ratio, rc, eta,
         if mode == "direct":
             cond = _geo_batched(geo)
             return model(lf_plain, None, cond) if cond is not None else model(lf_plain)
+        if mode == "fused":
+            return None  # single-pass regression: fused would duplicate tiled
         return reconstruct_full_tiled_directmap(
             model, lf_plain, tile=tile, overlap=args.overlap,
             batch=args.batch_tiles, geo_full=geo)

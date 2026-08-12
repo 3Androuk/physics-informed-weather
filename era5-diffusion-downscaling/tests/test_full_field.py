@@ -11,6 +11,8 @@ from models.transport import FlowMatching, StochasticInterpolant, build_transpor
 from models.unet import AttnBlock, build_unet
 from sample.full_field import (blend_window, crop_geo_tiles, crop_tiles,
                                crop_to_multiple,
+                               reconstruct_full_fused_diffusion,
+                               reconstruct_full_fused_transport,
                                reconstruct_full_tiled_diffusion,
                                reconstruct_full_tiled_directmap,
                                reconstruct_full_tiled_transport, stitch_tiles,
@@ -142,6 +144,71 @@ class TiledReconstructionTests(unittest.TestCase):
                                                overlap=8, batch=4)
         self.assertEqual(out.shape, self.hf.shape)
         self.assertTrue(torch.isfinite(out).all())
+
+
+class FusedReconstructionTests(unittest.TestCase):
+    """MultiDiffusion-style per-step fusion: one global chain over tile evals."""
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.cfg = tiny_config()
+        self.hf = torch.randn(1, 1, 32, 48)
+        self.ratio = 4
+        self.lf = degrade(self.hf, self.ratio)
+        self.coarse = coarsen(self.hf, self.ratio)
+
+    def test_fused_diffusion_shape_consistency_determinism(self):
+        model = build_unet(self.cfg, use_time=True)
+        diffusion = build_diffusion(self.cfg)
+        rc = {"K": 2, "t_steps": [3, 5]}
+        outs = [reconstruct_full_fused_diffusion(
+            diffusion, model, self.lf, self.coarse, self.ratio, rc, tile=16,
+            overlap=8, batch=4, project_steps=True,
+            generator=torch.Generator().manual_seed(3)) for _ in range(2)]
+        self.assertEqual(outs[0].shape, self.hf.shape)
+        self.assertTrue(torch.isfinite(outs[0]).all())
+        self.assertTrue(torch.allclose(coarsen(outs[0], self.ratio), self.coarse,
+                                       atol=1e-5))
+        self.assertTrue(torch.allclose(outs[0], outs[1]))
+
+    def test_fused_transport_shape_and_consistency(self):
+        model = build_transport_model(self.cfg, "flow")
+        out = reconstruct_full_fused_transport(
+            model, FlowMatching(), self.lf, self.coarse, self.ratio, self.cfg,
+            "flow", tile=16, overlap=8, batch=4, steps=2, solver="euler",
+            generator=torch.Generator().manual_seed(0))
+        self.assertEqual(out.shape, self.hf.shape)
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue(torch.allclose(coarsen(out, self.ratio), self.coarse,
+                                       atol=1e-5))
+
+    def test_fused_equals_tiled_when_tiles_cannot_disagree(self):
+        # A zero velocity field makes every tile's ODE trajectory constant, so
+        # per-step fusion and end-of-chain blending must give the SAME field
+        # (the shared global noise) — isolating the fusion machinery itself.
+        class ZeroField(nn.Module):
+            def forward(self, x, t, cond):
+                return torch.zeros_like(x)
+
+        common = dict(tile=16, overlap=8, batch=4, steps=2, solver="euler",
+                      project_final=False)
+        fused = reconstruct_full_fused_transport(
+            ZeroField(), FlowMatching(), self.lf, self.coarse, self.ratio,
+            self.cfg, "flow", generator=torch.Generator().manual_seed(11), **common)
+        tiled = reconstruct_full_tiled_transport(
+            ZeroField(), FlowMatching(), self.lf, self.coarse, self.ratio,
+            self.cfg, "flow", generator=torch.Generator().manual_seed(11), **common)
+        self.assertTrue(torch.allclose(fused, tiled, atol=1e-6))
+
+    def test_fused_si_sde(self):
+        model = build_transport_model(self.cfg, "stochastic_interpolant")
+        out = reconstruct_full_fused_transport(
+            model, StochasticInterpolant(), self.lf, self.coarse, self.ratio,
+            self.cfg, "stochastic_interpolant", tile=16, overlap=8, batch=4,
+            steps=2, sampler="sde", generator=torch.Generator().manual_seed(0))
+        self.assertEqual(out.shape, self.hf.shape)
+        self.assertTrue(torch.allclose(coarsen(out, self.ratio), self.coarse,
+                                       atol=1e-5))
 
 
 class SharedNoiseTests(unittest.TestCase):

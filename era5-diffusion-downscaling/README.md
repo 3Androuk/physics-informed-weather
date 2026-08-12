@@ -105,6 +105,15 @@ The models train on 128×128 patches but reconstruct **whole test fields**
   every stochastic sampler starts from crops of ONE global noise field, so
   overlapping tiles agree where they overlap; and a final exact block-average
   projection re-pins the stitched field to the observed coarse input globally.
+  At weakly-constrained ratios (8×) independent tile chains can still drift
+  apart at low frequencies (visible tile-scale squares); `--project-steps`
+  anchors every tile to the shared observation at every step.
+- **Fused** (`--modes fused`) — MultiDiffusion-style synchronized sampling
+  (Bar-Tal et al., ICML 2023): ONE global chain whose per-step prediction is
+  fused from overlapping tile evaluations, so tiles share a single trajectory
+  and cannot drift — seam-free by construction, at the same compute cost as
+  tiled. The same per-step tile-merging scheme is used for km-scale weather
+  diffusion (NVIDIA CorrDiff-family tiled sampling).
 
 ```bash
 python -m eval.full_field --config config/t2m.yaml --n-fields 4
