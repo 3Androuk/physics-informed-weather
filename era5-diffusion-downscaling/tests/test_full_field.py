@@ -114,6 +114,16 @@ class TiledReconstructionTests(unittest.TestCase):
         self.assertEqual(out.shape, self.hf.shape)
         self.assertTrue(torch.allclose(coarsen(out, self.ratio), self.coarse, atol=1e-5))
 
+    def test_tiled_transport_project_each(self):
+        model = build_transport_model(self.cfg, "flow")
+        out = reconstruct_full_tiled_transport(
+            model, FlowMatching(), self.lf, self.coarse, self.ratio, self.cfg,
+            "flow", tile=16, overlap=8, batch=4, steps=2, solver="euler",
+            project_each=True, generator=torch.Generator().manual_seed(0))
+        self.assertEqual(out.shape, self.hf.shape)
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue(torch.allclose(coarsen(out, self.ratio), self.coarse, atol=1e-5))
+
     def test_tiled_diffusion(self):
         model = build_unet(self.cfg, use_time=True)
         diffusion = build_diffusion(self.cfg)
