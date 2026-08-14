@@ -31,6 +31,17 @@ def _parser(method: str):
                     help="Enable the configured geographic encoder.")
     ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None)
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--residual", action="store_true",
+                    help="Transport the RESIDUAL (y - mean)/res_std instead of the "
+                         "full field, conditioning on the mean rather than the "
+                         "nearest-upsampled LF. Mean is bicubic unless --mean-ckpt "
+                         "is given. Shorter, straighter transport paths — the same "
+                         "split-model idea as train_residual.py.")
+    ap.add_argument("--mean-ckpt", default=None,
+                    help="Checkpoint name in paths.ckpt_dir of a frozen "
+                         "ratio-randomized regression mean (meanmap*.pt from "
+                         "train_directmap --random-ratio). Implies --residual; the "
+                         "checkpoint stem gains an _lm suffix and remembers the mean.")
     return ap
 
 
@@ -63,13 +74,63 @@ def run(method: str):
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
     normalizer = load_norm_stats(patch_dir)
     geo_on = cfg.get("geo", {}).get("enabled", False)
-    ds_kwargs = _geo_dataset_kwargs(cfg, patch_dir, "train") if geo_on else {}
+
+    # ── Residual mode: transport (y - mean)/res_std, conditioned on the mean.
+    # The mean may be geo-conditioned even when the transport model is not, in
+    # which case coords are still needed to evaluate it.
+    residual_mode = args.residual or args.mean_ckpt is not None
+    mean_cfg, mean_geo = None, False
+    if args.mean_ckpt:
+        from sample.reconstruct import load_directmap  # noqa: PLC0415
+        mean_model, mean_cfg = load_directmap(ckpt_dir / args.mean_ckpt, device)
+        for p in mean_model.parameters():
+            p.requires_grad_(False)
+        mean_model.eval()
+        mean_geo = mean_cfg.get("geo", {}).get("enabled", False)
+        print(f"Learned mean: {args.mean_ckpt} (geo={mean_geo}, frozen)")
+
+        def mean_fn(y, r, coords=None):
+            with torch.no_grad():
+                x = degrade(y, r)
+                return mean_model(x, None, coords) if mean_geo else mean_model(x)
+    else:
+        def mean_fn(y, r, coords=None):
+            lo = coarsen(y, r)
+            return torch.nn.functional.interpolate(
+                lo, size=y.shape[-2:], mode="bicubic", align_corners=False)
+
+    if args.mean_ckpt and mean_geo and geo_on:
+        assert (mean_cfg["geo"].get("encoder", "hash")
+                == cfg["geo"].get("encoder", "hash")), \
+            "mean and transport geo encoders must match (they share one coords payload)"
+    need_coords = geo_on or mean_geo
+
+    ds_kwargs = (_geo_dataset_kwargs(cfg if geo_on else mean_cfg, patch_dir, "train")
+                 if need_coords else {})
     dataset = PatchDataset(patch_dir / "train_patches.npy", normalizer, **ds_kwargs)
     loader = DataLoader(
         dataset, batch_size=train_cfg["batch_size"], shuffle=True,
         num_workers=train_cfg["num_workers"], pin_memory=True, drop_last=True,
         persistent_workers=train_cfg["num_workers"] > 0,
     )
+
+    # ── Residual normalization: one scalar std estimated once against the mean
+    # actually in use, over all training ratios. The mean-field conditioning
+    # channel tells the model which regime it is in, so a shared scale suffices;
+    # the value is stored in the checkpoint so sampling can undo it.
+    res_std = 1.0
+    if residual_mode:
+        with torch.no_grad():
+            items = [dataset[i] for i in range(min(64, len(dataset)))]
+            if need_coords:
+                y64 = torch.stack([it[0] for it in items]).to(device)
+                c64 = torch.stack([it[1] for it in items]).to(device)
+            else:
+                y64, c64 = torch.stack(items).to(device), None
+            chunks = [(y64 - mean_fn(y64, r, c64)).flatten().cpu() for r in ratios]
+            res_std = float(torch.cat(chunks).std())
+            del y64, c64
+        print(f"Residual std (normalized units): {res_std:.4f}")
 
     model = build_transport_model(cfg, method).to(device)
     process = build_transport(cfg, method)
@@ -81,7 +142,8 @@ def run(method: str):
     use_amp = train_cfg.get("amp", False) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    stem = _checkpoint_stem(method, cfg, args.seed is not None)
+    stem = _checkpoint_stem(method, cfg, args.seed is not None,
+                            residual_mode, args.mean_ckpt is not None)
     ckpt_path = ckpt_dir / f"{stem}.pt"
     start_epoch, step = 1, 0
     if args.resume and ckpt_path.exists():
@@ -90,12 +152,17 @@ def run(method: str):
         ema.load_state_dict(ck["ema"])
         optimizer.load_state_dict(ck["opt"])
         scaler.load_state_dict(ck["scaler"])
+        if residual_mode and "res_std" in ck:
+            # Reuse the stored scale rather than re-estimating: a fresh estimate
+            # from a different 64-patch draw would silently change the target.
+            res_std = ck["res_std"]
         start_epoch, step = ck["epoch"] + 1, ck["step"]
         print(f"Resumed {ckpt_path} at epoch {ck['epoch']} (step {step})")
     elif args.resume:
         print(f"No checkpoint at {ckpt_path}; starting fresh")
 
-    val_loader = _validation_loader(cfg, patch_dir, normalizer, geo_on)
+    val_loader = _validation_loader(cfg, patch_dir, normalizer, need_coords,
+                                    cfg if geo_on else mean_cfg)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"{method} | ratios={ratios} | patches={len(dataset)} | "
           f"params={n_params:,} | geo={geo_on} | device={device}")
@@ -109,7 +176,9 @@ def run(method: str):
     wb_run, wandb = init_wandb(
         cfg, job_type=f"train_{method}",
         extra_config={"method": method, "train_ratios": ratios,
-                      "unet_params": n_params, "n_train_patches": len(dataset)},
+                      "unet_params": n_params, "n_train_patches": len(dataset),
+                      "residual": residual_mode, "res_std": res_std,
+                      "mean_ckpt": args.mean_ckpt},
         name=run_name(cfg, stem, "resumed" if start_epoch > 1 else ""),
     )
 
@@ -121,13 +190,19 @@ def run(method: str):
         epoch_sum, epoch_n = 0.0, 0
         epoch_start = time.time()
         for batch in loader:
-            target, coords = _move_batch(batch, geo_on, device)
+            target, coords = _move_batch(batch, need_coords, device)
             ratio = random.choice(ratios)
-            low_res = degrade(target, ratio)
+            if residual_mode:
+                # Condition on the mean field (strictly more informative than the
+                # nearest-upsampled LF) and transport the normalized residual.
+                cond_field = mean_fn(target, ratio, coords)
+                train_target = (target - cond_field) / res_std
+            else:
+                cond_field, train_target = degrade(target, ratio), target
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 result = process.training_loss(
-                    model, target, low_res, coords, return_details=True)
+                    model, train_target, cond_field, coords, return_details=True)
                 loss, _, _, *extra = result
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -175,7 +250,8 @@ def run(method: str):
         }
         if val_loader is not None:
             epoch_metrics.update(_validate(
-                process, ema.shadow, val_loader, device, geo_on, ratios))
+                process, ema.shadow, val_loader, device, need_coords, ratios,
+                residual_mode, mean_fn, res_std))
             vals = " | ".join(f"{k} {v:.5f}" for k, v in epoch_metrics.items()
                               if k.startswith("val/"))
             print(f"epoch {epoch:03d} done | {vals}")
@@ -187,7 +263,8 @@ def run(method: str):
             sample_path = results_dir / f"{stem}_epoch{epoch:03d}.png"
             sample_metrics = _save_samples(
                 process, ema.shadow, val_loader.dataset, normalizer, device,
-                geo_on, cfg, method, sample_path)
+                need_coords, cfg, method, sample_path,
+                residual_mode, mean_fn, res_std)
             _log_metrics(sample_metrics, step, writer, wb_run)
             if wb_run is not None:
                 wb_run.log({"samples/reconstructions": wandb.Image(str(sample_path))}, step=step)
@@ -196,7 +273,8 @@ def run(method: str):
             if not _weights_finite(model) or not _weights_finite(ema.shadow):
                 raise RuntimeError("non-finite transport weights; checkpoint not overwritten")
             _save_checkpoint(ckpt_path, model, ema, optimizer, scaler, cfg,
-                             normalizer, method, epoch, step)
+                             normalizer, method, epoch, step,
+                             residual_mode, res_std, args.mean_ckpt)
 
     if writer:
         writer.close()
@@ -222,26 +300,28 @@ def _validate_ratios(size, ratios, name):
                          f"{size}: {invalid}")
 
 
-def _validation_loader(cfg, patch_dir, normalizer, geo_on):
+def _validation_loader(cfg, patch_dir, normalizer, need_coords, geo_cfg=None):
     path = patch_dir / "test_patches.npy"
     if not path.exists():
         return None
-    kwargs = _geo_dataset_kwargs(cfg, patch_dir, "test") if geo_on else {}
+    kwargs = (_geo_dataset_kwargs(geo_cfg or cfg, patch_dir, "test")
+              if need_coords else {})
     ds = PatchDataset(path, normalizer, **kwargs)
     n = min(int(cfg["train"].get("val_patches", 256)), len(ds))
     return DataLoader(Subset(ds, range(n)), batch_size=cfg["train"]["batch_size"],
                       shuffle=False, num_workers=0)
 
 
-def _move_batch(batch, geo_on, device):
-    if geo_on:
+def _move_batch(batch, need_coords, device):
+    if need_coords:
         target, coords = batch
         return target.to(device, non_blocking=True), coords.to(device, non_blocking=True)
     return batch.to(device, non_blocking=True), None
 
 
 @torch.no_grad()
-def _validate(process, model, loader, device, geo_on, ratios):
+def _validate(process, model, loader, device, need_coords, ratios,
+              residual_mode=False, mean_fn=None, res_std=1.0):
     was_training = model.training
     model.eval()
     totals = {r: 0.0 for r in ratios}
@@ -252,9 +332,14 @@ def _validate(process, model, loader, device, geo_on, ratios):
         if device.type == "cuda":
             torch.cuda.manual_seed_all(0)
         for batch in loader:
-            target, coords = _move_batch(batch, geo_on, device)
+            target, coords = _move_batch(batch, need_coords, device)
             for ratio in ratios:
-                loss = process.training_loss(model, target, degrade(target, ratio), coords)
+                if residual_mode:
+                    cond_field = mean_fn(target, ratio, coords)
+                    tgt = (target - cond_field) / res_std
+                else:
+                    cond_field, tgt = degrade(target, ratio), target
+                loss = process.training_loss(model, tgt, cond_field, coords)
                 totals[ratio] += loss.item() * target.shape[0]
             count += target.shape[0]
     if was_training:
@@ -264,7 +349,8 @@ def _validate(process, model, loader, device, geo_on, ratios):
 
 @torch.no_grad()
 def _save_samples(process, model, subset, normalizer, device, geo_on,
-                  cfg, method, path):
+                  cfg, method, path, residual_mode=False, mean_fn=None,
+                  res_std=1.0):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -284,7 +370,12 @@ def _save_samples(process, model, subset, normalizer, device, geo_on,
             y, c = target[i:i + 1], None if coords is None else coords[i:i + 1]
             low_res = degrade(y, ratio)
             coarse = coarsen(y, ratio)
-            rec = _sample(process, model, low_res, c, coarse, ratio, cfg, method)
+            if residual_mode:
+                mean_f = mean_fn(y, ratio, c)
+                rec = mean_f + res_std * _sample(process, model, mean_f, c,
+                                                 coarse, ratio, cfg, method)
+            else:
+                rec = _sample(process, model, low_res, c, coarse, ratio, cfg, method)
             recs.append((rec, y))
             row.extend([(f"Input {ratio}x", low_res), (f"Sample {ratio}x", rec)])
         row.append(("Target", target[i:i + 1]))
@@ -327,9 +418,14 @@ def _sample(process, model, low_res, coords, coarse, ratio, cfg, method):
     return process.sample(model, low_res, **common)
 
 
-def _checkpoint_stem(method, cfg, seed_overridden):
+def _checkpoint_stem(method, cfg, seed_overridden, residual_mode=False,
+                     learned_mean=False):
     stem = "flow_matching" if method == "flow" else "stochastic_interpolant"
+    if residual_mode:
+        stem += "_res"
     stem += geo_suffix(cfg)
+    if learned_mean:
+        stem += "_lm"
     if seed_overridden:
         stem += f"_s{cfg['seed']}"
     return stem
@@ -349,7 +445,8 @@ def _weights_finite(model):
 
 
 def _save_checkpoint(path, model, ema, optimizer, scaler, cfg,
-                     normalizer, method, epoch, step):
+                     normalizer, method, epoch, step,
+                     residual_mode=False, res_std=1.0, mean_ckpt=None):
     tmp = path.with_suffix(".pt.tmp")
     torch.save({
         "model": model.state_dict(), "ema": ema.state_dict(),
@@ -357,5 +454,8 @@ def _save_checkpoint(path, model, ema, optimizer, scaler, cfg,
         "config": cfg, "method": method,
         "norm_mean": normalizer.mean, "norm_std": normalizer.std,
         "epoch": epoch, "step": step,
+        # Residual mode needs both to reconstruct: the scale the residual was
+        # normalized by, and which frozen mean it was trained against.
+        "residual": residual_mode, "res_std": res_std, "mean_ckpt": mean_ckpt,
     }, tmp)
     tmp.replace(path)
