@@ -44,6 +44,25 @@ def ensure_dir(path: str | os.PathLike) -> Path:
 
 _VAR_SHORT = {"2m_temperature": "t2m", "geopotential": "z500"}
 
+# Checkpoint-name tag per geo encoder ("" for the default hash grid, so
+# existing checkpoint names like diffusion_geo.pt / diffusion_geo_hpx.pt are
+# unchanged).
+_ENCODER_TAG = {"hash": "", "healpix": "_hpx", "xyz": "_xyz",
+                "sinusoidal": "_sin", "static": "_static"}
+
+
+def geo_suffix(cfg: dict) -> str:
+    """Checkpoint-name suffix identifying the geo conditioning: '' when geo is
+    disabled, else '_geo' + the encoder tag (e.g. '_geo', '_geo_hpx',
+    '_geo_static')."""
+    g = cfg.get("geo", {})
+    if not g.get("enabled", False):
+        return ""
+    encoder = g.get("encoder", "hash")
+    if encoder not in _ENCODER_TAG:
+        raise ValueError(f"unknown geo encoder: {encoder}")
+    return "_geo" + _ENCODER_TAG[encoder]
+
 
 def run_name(cfg: dict, *parts: str) -> str:
     """Canonical wandb run name: short variable + identity parts.

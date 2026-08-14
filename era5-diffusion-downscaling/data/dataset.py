@@ -51,6 +51,11 @@ class PatchDataset(Dataset):
         (L, H, W, 8) = [4 neighbor cell indices | 4 weights] so that default
         collate, .to(device), stacking, and slicing all work unchanged
         (indices are fp32-exact for Nside <= 1024). Consumed by HealpixGrid.
+      - "static": the per-patch crop of the precomputed normalized static
+        physiographic fields (see data/make_static_fields.py), channels-last
+        (H, W, S). Consumed by StaticFields (identity).
+      - "xyz"/"sinusoidal": same coordinate payload as "hash" (their encoders
+        consume the coordinates directly).
     """
 
     def __init__(self, patch_path: str | Path, normalizer: Normalizer,
@@ -71,7 +76,10 @@ class PatchDataset(Dataset):
                 hp = np.load(hp_path)
                 self.hpx_idx = hp["idx"]   # (L, H, W, 4) int64
                 self.hpx_w = hp["w"]       # (L, H, W, 4) float32
-            else:
+            elif geo_encoder == "static":
+                sf = np.load(Path(coords_full_path).parent / "static_fields.npz")
+                self.static = sf["fields"]  # (S, H, W) float32, normalized
+            else:  # hash / xyz / sinusoidal all consume the coordinate payload
                 from models.geo_encoding import build_patch_coords  # local import
                 self._build_coords = build_patch_coords
                 self.geo_input_dim = geo_input_dim
@@ -93,6 +101,9 @@ class PatchDataset(Dataset):
             idx = torch.from_numpy(self.hpx_idx[:, r:r + s, c:c + s, :].astype(np.float32))
             w = torch.from_numpy(np.ascontiguousarray(self.hpx_w[:, r:r + s, c:c + s, :]))
             return x, torch.cat([idx, w], dim=-1)   # (L, s, s, 8)
+        if self.geo_encoder == "static":
+            crop = np.ascontiguousarray(self.static[:, r:r + s, c:c + s])
+            return x, torch.from_numpy(crop).permute(1, 2, 0)  # (s, s, S)
         alt = self.altitude if self.geo_input_dim == 4 else None
         coords = self._build_coords(
             self.lat_full[r:r + s], self.lon_full[c:c + s], altitude=alt

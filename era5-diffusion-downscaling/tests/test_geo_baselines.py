@@ -1,0 +1,169 @@
+"""CPU unit tests for the geo-conditioning baseline encoders.
+
+The comparison ladder for the learned location tables (hash/HEALPix):
+  xyz        raw unit-sphere coordinates (trivial baseline)
+  sinusoidal fixed multiscale Fourier basis (engineered-basis baseline)
+  static     real physiographic fields (literature-standard strong null)
+"""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from data.dataset import Normalizer, PatchDataset
+from models.geo_encoding import (RawCoords, SinusoidalSphere, StaticFields,
+                                 build_geo_encoder)
+from models.transport import build_transport_model
+from utils import geo_suffix
+
+
+def geo_cfg(encoder, **extra):
+    g = {"enabled": True, "encoder": encoder, "input_dim": 3, "altitude": None,
+         "n_levels": 4, "n_features_per_level": 2, "log2_hashmap_size": 10,
+         "base_resolution": 4, "finest_resolution": 16,
+         "healpix_n_levels": 3, "healpix_nside_max": 4,
+         "sinusoidal_n_frequencies": 2,
+         "static_fields": ["geopotential_at_surface", "land_sea_mask"]}
+    g.update(extra)
+    return {
+        "patches": {"size": 16},
+        "unet": {"in_channels": 1, "out_channels": 1, "base_channels": 8,
+                 "channel_mults": [1, 2], "num_res_blocks": 1,
+                 "time_emb_dim": 16, "attn_resolutions": [8], "dropout": 0.0,
+                 "groupnorm_groups": 4},
+        "geo": g,
+        "transport": {"time_scale": 100.0, "time_epsilon": 1e-3},
+    }
+
+
+class EncoderTests(unittest.TestCase):
+    def test_raw_coords_is_identity(self):
+        enc = RawCoords(input_dim=3)
+        coords = torch.rand(2, 8, 8, 3)
+        self.assertEqual(enc.output_dim, 3)
+        self.assertTrue(torch.equal(enc(coords), coords))
+        self.assertEqual(sum(p.numel() for p in enc.parameters()), 0)
+
+    def test_sinusoidal_shape_determinism_no_params(self):
+        enc = SinusoidalSphere(input_dim=3, n_frequencies=2)
+        coords = torch.rand(2, 8, 8, 3)
+        out = enc(coords)
+        self.assertEqual(enc.output_dim, 12)  # 3 * 2 * 2
+        self.assertEqual(out.shape, (2, 8, 8, 12))
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue(out.abs().max() <= 1.0 + 1e-6)
+        self.assertTrue(torch.equal(out, enc(coords)))  # deterministic
+        self.assertEqual(sum(p.numel() for p in enc.parameters()), 0)
+
+    def test_sinusoidal_distinguishes_locations(self):
+        enc = SinusoidalSphere(input_dim=3, n_frequencies=2)
+        a = enc(torch.tensor([[0.1, 0.5, 0.9]]))
+        b = enc(torch.tensor([[0.6, 0.2, 0.3]]))
+        self.assertFalse(torch.allclose(a, b))
+
+    def test_static_fields_is_identity(self):
+        enc = StaticFields(n_fields=2)
+        payload = torch.rand(2, 8, 8, 2)
+        self.assertEqual(enc.output_dim, 2)
+        self.assertTrue(torch.equal(enc(payload), payload))
+
+    def test_build_geo_encoder_dispatch(self):
+        expected_dims = {"hash": 8, "healpix": 6, "xyz": 3,
+                         "sinusoidal": 12, "static": 2}
+        for encoder, dim in expected_dims.items():
+            enc = build_geo_encoder(geo_cfg(encoder))
+            self.assertEqual(enc.output_dim, dim, encoder)
+        with self.assertRaises(ValueError):
+            build_geo_encoder(geo_cfg("nope"))
+
+
+class SuffixTests(unittest.TestCase):
+    def test_geo_suffix(self):
+        self.assertEqual(geo_suffix({"geo": {"enabled": False}}), "")
+        self.assertEqual(geo_suffix({}), "")
+        for encoder, tag in (("hash", "_geo"), ("healpix", "_geo_hpx"),
+                             ("xyz", "_geo_xyz"), ("sinusoidal", "_geo_sin"),
+                             ("static", "_geo_static")):
+            self.assertEqual(geo_suffix({"geo": {"enabled": True,
+                                                 "encoder": encoder}}), tag)
+        with self.assertRaises(ValueError):
+            geo_suffix({"geo": {"enabled": True, "encoder": "nope"}})
+
+
+class StaticDatasetTests(unittest.TestCase):
+    def test_patch_dataset_static_payload(self):
+        rng = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            patches = rng.normal(size=(3, 1, 8, 8)).astype(np.float32)
+            origins = np.array([[0, 0], [4, 8], [8, 16]], dtype=np.int32)
+            np.save(tmp / "patches.npy", patches)
+            np.save(tmp / "origins.npy", origins)
+            np.savez(tmp / "coords_full.npz",
+                     lat=np.linspace(-60, 60, 16), lon=np.linspace(0, 360, 24))
+            static = rng.normal(size=(2, 16, 24)).astype(np.float32)
+            np.savez(tmp / "static_fields.npz", fields=static,
+                     names=np.array(["orog", "lsm"]),
+                     mean=np.zeros(2), std=np.ones(2))
+
+            ds = PatchDataset(tmp / "patches.npy", Normalizer(0.0, 1.0),
+                              origins_path=tmp / "origins.npy",
+                              coords_full_path=tmp / "coords_full.npz",
+                              geo_encoder="static")
+            x, payload = ds[1]
+            self.assertEqual(tuple(payload.shape), (8, 8, 2))
+            # channels-last crop matches the (S, H, W) source at the origin
+            np.testing.assert_allclose(payload.numpy(),
+                                       static[:, 4:12, 8:16].transpose(1, 2, 0))
+            del ds  # release mmap before the tempdir is removed
+
+
+class ConditionedModelTests(unittest.TestCase):
+    """Every encoder must plug into the conditioned models via the same
+    extra-channels path."""
+
+    def _payload(self, encoder, batch=2, size=16):
+        if encoder == "static":
+            return torch.rand(batch, size, size, 2)
+        if encoder == "healpix":
+            # per-level indices must stay inside each level's 12*Nside^2 cells
+            from models.geo_encoding import healpix_nside_ladder
+            nsides = healpix_nside_ladder(3, 1, 4)
+            idx = torch.stack([
+                torch.randint(0, 12 * ns * ns, (batch, size, size, 4)).float()
+                for ns in nsides], dim=1)                     # (B, L, s, s, 4)
+            w = torch.softmax(torch.rand(batch, 3, size, size, 4), dim=-1)
+            return torch.cat([idx, w], dim=-1)
+        return torch.rand(batch, size, size, 3)  # hash / xyz / sinusoidal
+
+    def test_transport_model_with_each_encoder(self):
+        torch.manual_seed(0)
+        for encoder in ("hash", "healpix", "xyz", "sinusoidal", "static"):
+            cfg = geo_cfg(encoder)
+            model = build_transport_model(cfg, "flow")
+            x = torch.randn(2, 1, 16, 16)
+            low_res = torch.randn(2, 1, 16, 16)
+            out = model(x, torch.rand(2), (low_res, self._payload(encoder)))
+            self.assertEqual(out.shape, x.shape, encoder)
+            self.assertTrue(torch.isfinite(out).all(), encoder)
+
+    def test_geo_conditioned_unet_with_baselines(self):
+        from models.geo_encoding import GeoConditionedUNet
+        from models.unet import build_unet
+        torch.manual_seed(0)
+        for encoder in ("xyz", "sinusoidal", "static"):
+            cfg = geo_cfg(encoder)
+            geo_enc = build_geo_encoder(cfg)
+            base = build_unet(cfg, use_time=True,
+                              extra_in_channels=geo_enc.output_dim)
+            model = GeoConditionedUNet(base, geo_enc)
+            x = torch.randn(2, 1, 16, 16)
+            out = model(x, torch.ones(2), self._payload(encoder))
+            self.assertEqual(out.shape, x.shape, encoder)
+
+
+if __name__ == "__main__":
+    unittest.main()

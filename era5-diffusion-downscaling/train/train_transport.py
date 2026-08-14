@@ -17,8 +17,8 @@ from data.degrade import coarsen, degrade  # noqa: E402
 from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.transport import build_transport, build_transport_model  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (ensure_dir, geo_suffix, get_device, init_wandb,  # noqa: E402
+                   load_config, run_name, set_seed)
 
 
 def _parser(method: str):
@@ -29,7 +29,7 @@ def _parser(method: str):
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--geo", action="store_true",
                     help="Enable the configured geographic encoder.")
-    ap.add_argument("--encoder", choices=["hash", "healpix"], default=None)
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None)
     ap.add_argument("--seed", type=int, default=None)
     return ap
 
@@ -326,11 +326,7 @@ def _sample(process, model, low_res, coords, coarse, ratio, cfg, method):
 
 def _checkpoint_stem(method, cfg, seed_overridden):
     stem = "flow_matching" if method == "flow" else "stochastic_interpolant"
-    geo_on = cfg.get("geo", {}).get("enabled", False)
-    if geo_on:
-        stem += "_geo"
-        if cfg["geo"].get("encoder", "hash") == "healpix":
-            stem += "_hpx"
+    stem += geo_suffix(cfg)
     if seed_overridden:
         stem += f"_s{cfg['seed']}"
     return stem

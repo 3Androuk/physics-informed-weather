@@ -283,11 +283,17 @@ def _geo_full(cfg_ck, patch_dir, hw, device):
         return None
     g = cfg_ck["geo"]
     h, w = hw
-    if g.get("encoder", "hash") == "healpix":
+    encoder = g.get("encoder", "hash")
+    if encoder == "healpix":
         hp = np.load(patch_dir / "healpix_index.npz")
         idx = torch.from_numpy(hp["idx"][:, :h, :w, :].astype(np.float32))
         wts = torch.from_numpy(np.ascontiguousarray(hp["w"][:, :h, :w, :]))
         return torch.cat([idx, wts], dim=-1).to(device)
+    if encoder == "static":
+        sf = np.load(patch_dir / "static_fields.npz")
+        fields = np.ascontiguousarray(sf["fields"][:, :h, :w])
+        return torch.from_numpy(fields).permute(1, 2, 0).to(device)  # (h, w, S)
+    # hash / xyz / sinusoidal all consume the coordinate payload
     from models.geo_encoding import build_patch_coords
     cf = np.load(patch_dir / "coords_full.npz")
     alt = g.get("altitude") if g.get("input_dim", 3) == 4 else None

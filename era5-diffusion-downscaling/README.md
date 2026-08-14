@@ -57,6 +57,26 @@ Both samplers optionally apply an exact final block-average projection so the
 generated field coarsens back to the observed input. The default training ratios
 are `{2, 4, 8}` and the default evaluation also includes held-out `16×`.
 
+### Geographic conditioning: learned embeddings vs baselines
+
+The learned location tables (`--encoder hash|healpix`) are compared against a
+ladder of baselines that isolate what, if anything, the *learning* contributes
+(all selectable via `--geo --encoder <name>` on every trainer; checkpoint names
+gain matching suffixes `_geo`, `_geo_hpx`, `_geo_xyz`, `_geo_sin`,
+`_geo_static`):
+
+| encoder      | payload                              | learned geo params | isolates |
+|--------------|--------------------------------------|--------------------|----------|
+| `xyz`        | raw unit-sphere coords as channels   | 0                  | is *any* encoder needed beyond coordinates? |
+| `sinusoidal` | fixed multiscale Fourier basis       | 0                  | learned tables vs engineered multiscale basis |
+| `static`     | real orography / land-sea mask / slope (WB2) | 0          | learned location identity vs physiography (the literature default) |
+| `hash`, `healpix` | learned multiresolution tables  | ~0.5M              | — |
+
+`static` needs a one-time precompute:
+`python -m data.make_static_fields --config config/t2m.yaml` (a few MB from
+the same WB2 zarr). The `--shuffle-geo` permutation control in
+`eval.make_tables_figures` applies to every arm.
+
 ## Full-field reconstruction
 
 The models train on 128×128 patches but reconstruct **whole test fields**
