@@ -27,6 +27,10 @@ import torch.nn as nn
 # Large primes for the spatial hash (Instant-NGP); pi_1 = 1 by convention.
 _PRIMES = [1, 2654435761, 805459861, 3674653429]
 
+# Default static physiographic conditioning fields (all in the WB2 ERA5 zarr).
+DEFAULT_STATIC_FIELDS = ["geopotential_at_surface", "land_sea_mask",
+                         "slope_of_sub_gridscale_orography"]
+
 
 def latlon_to_unit_sphere(lat_deg, lon_deg):
     """(lat, lon) in degrees -> unit-sphere Cartesian (x, y, z) in [-1, 1].
@@ -210,6 +214,66 @@ class HealpixGrid(nn.Module):
         return torch.cat(outs, dim=-1)
 
 
+class RawCoords(nn.Module):
+    """Identity 'encoder': the unit-sphere coordinates themselves as channels.
+
+    The trivial baseline for the learned tables (CoordConv-style): the UNet
+    receives exactly the information the tables index with — (x, y, z) in
+    [0, 1] per pixel — and must extract any location context itself. Zero
+    parameters."""
+
+    def __init__(self, input_dim=3):
+        super().__init__()
+        self.output_dim = input_dim
+
+    def forward(self, coords):
+        return coords
+
+
+class SinusoidalSphere(nn.Module):
+    """Fixed multiscale Fourier features of the unit-sphere coordinates.
+
+    The engineered-basis baseline (NeRF-style positional encoding on the
+    sphere-embedded coordinates; cf. CorrDiff's 'sinusoidal' grid option and
+    spherical location encoders, Russwurm et al. 2024): multiscale structure
+    like the learned tables, but zero learned parameters — isolating whether
+    the tables' gain comes from LEARNING or merely from a multiscale basis.
+    output_dim = input_dim * 2 * n_frequencies (18 for d=3, n=3 — comparable
+    to the default 16-dim hash/HEALPix embedding)."""
+
+    def __init__(self, input_dim=3, n_frequencies=3):
+        super().__init__()
+        self.d = input_dim
+        self.output_dim = input_dim * 2 * n_frequencies
+        freqs = (2.0 ** torch.arange(n_frequencies).float()) * torch.pi
+        self.register_buffer("freqs", freqs)
+
+    def forward(self, coords):
+        # coords (..., d) in [0, 1] -> [-1, 1] so frequency 2^0*pi spans one period
+        x = coords * 2.0 - 1.0
+        args = x.unsqueeze(-1) * self.freqs            # (..., d, n)
+        feats = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        return feats.reshape(*coords.shape[:-1], self.output_dim)
+
+
+class StaticFields(nn.Module):
+    """Identity 'encoder' over precomputed static physiographic channels.
+
+    The literature-standard baseline (orography, land-sea mask, ... — Harris
+    et al. 2022, DL4DS, HiRO): real per-pixel fields from the WB2 store,
+    normalized and cropped per patch by data/make_static_fields.py +
+    PatchDataset. Zero learned geographic parameters, so no capacity to
+    memorize train-year anomalies — the strong null the learned tables must
+    beat."""
+
+    def __init__(self, n_fields):
+        super().__init__()
+        self.output_dim = n_fields
+
+    def forward(self, payload):
+        return payload
+
+
 class GeoConditionedUNet(nn.Module):
     """Wrap a base UNet to consume a per-pixel geographic embedding.
 
@@ -231,15 +295,30 @@ class GeoConditionedUNet(nn.Module):
 
 
 def build_geo_encoder(cfg: dict):
-    """Dispatch on cfg['geo'].encoder: 'hash' (default) or 'healpix'."""
+    """Dispatch on cfg['geo'].encoder.
+
+    Learned: 'hash' (default, Instant-NGP grid), 'healpix' (dense spherical
+    pyramid). Baselines: 'xyz' (raw coordinates), 'sinusoidal' (fixed Fourier
+    basis), 'static' (real physiographic fields)."""
     g = cfg["geo"]
-    if g.get("encoder", "hash") == "healpix":
+    encoder = g.get("encoder", "hash")
+    if encoder == "healpix":
         return HealpixGrid(
             n_levels=g.get("healpix_n_levels", g["n_levels"]),
             n_features_per_level=g["n_features_per_level"],
             nside_min=g.get("healpix_nside_min", 1),
             nside_max=g.get("healpix_nside_max", 128),
         )
+    if encoder == "xyz":
+        return RawCoords(input_dim=g.get("input_dim", 3))
+    if encoder == "sinusoidal":
+        return SinusoidalSphere(input_dim=g.get("input_dim", 3),
+                                n_frequencies=g.get("sinusoidal_n_frequencies", 3))
+    if encoder == "static":
+        return StaticFields(n_fields=len(g.get("static_fields",
+                                               DEFAULT_STATIC_FIELDS)))
+    if encoder != "hash":
+        raise ValueError(f"unknown geo encoder: {encoder}")
     return MultiResHashGrid(
         input_dim=g["input_dim"],
         n_levels=g["n_levels"],

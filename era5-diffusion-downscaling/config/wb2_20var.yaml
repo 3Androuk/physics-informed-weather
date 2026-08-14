@@ -85,7 +85,13 @@ unet:
 
 geo:
   enabled: false
+  # hash | healpix (learned) | xyz | sinusoidal | static (baselines — see t2m.yaml)
   encoder: hash
+  sinusoidal_n_frequencies: 3
+  static_fields:
+    - geopotential_at_surface
+    - land_sea_mask
+    - slope_of_sub_gridscale_orography
   healpix_n_levels: 8
   healpix_nside_max: 128
   input_dim: 3

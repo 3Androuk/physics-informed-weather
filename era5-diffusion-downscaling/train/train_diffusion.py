@@ -23,7 +23,8 @@ from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.ema import EMA  # noqa: E402
 from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
-                   get_device, init_wandb, load_config, run_name, set_seed)
+                   geo_suffix, get_device, init_wandb, load_config, run_name,
+                   set_seed)
 
 
 def main():
@@ -40,7 +41,7 @@ def main():
                     help="Override config seed for replicate runs; the checkpoint "
                          "name gets an _s<seed> suffix so replicates don't "
                          "overwrite the primary run.")
-    ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
     args = ap.parse_args()
@@ -63,8 +64,7 @@ def main():
 
     geo_on = cfg.get("geo", {}).get("enabled", False)
     seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
-    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
-    ckpt_name = f"diffusion{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{seed_suffix}.pt"
+    ckpt_name = f"diffusion{geo_suffix(cfg)}{seed_suffix}.pt"
 
     normalizer = load_norm_stats(patch_dir)
     if geo_on:

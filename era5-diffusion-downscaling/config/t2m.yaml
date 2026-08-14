@@ -65,10 +65,20 @@ unet:
 # weights grew large). Static geography is smooth — cap the cells at ~150 km.
 geo:
   enabled: false                   # train the baseline first, then set true
-  # encoder: "hash" (Instant-NGP cube grid, default) or "healpix" (dense
-  # equal-area spherical pyramid — no hash collisions; precompute once on the
-  # cluster: python -m data.make_healpix_index --config config/t2m.yaml).
+  # Learned encoders: "hash" (Instant-NGP cube grid, default) or "healpix"
+  # (dense equal-area spherical pyramid — no hash collisions; precompute once:
+  # python -m data.make_healpix_index --config config/t2m.yaml).
+  # Comparison baselines (zero learned geographic parameters):
+  #   "xyz"        raw unit-sphere coordinates as channels (trivial baseline)
+  #   "sinusoidal" fixed multiscale Fourier basis of the coordinates
+  #   "static"     real physiographic fields (orography, land-sea mask, ...);
+  #                precompute once: python -m data.make_static_fields --config ...
   encoder: hash
+  sinusoidal_n_frequencies: 3      # sinusoidal: output_dim = input_dim * 2 * n
+  static_fields:                   # static: WB2 zarr variables, in channel order
+    - geopotential_at_surface
+    - land_sea_mask
+    - slope_of_sub_gridscale_orography
   healpix_n_levels: 8
   healpix_nside_max: 128           # finest HEALPix level (~0.46 deg cells)
   input_dim: 3

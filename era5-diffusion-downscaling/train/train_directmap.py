@@ -22,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
-from utils import (display_channel, ensure_dir, get_device, init_wandb,  # noqa: E402
-                   load_config, run_name, set_seed)
+from utils import (display_channel, ensure_dir, geo_suffix, get_device,  # noqa: E402
+                   init_wandb, load_config, run_name, set_seed)
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
                     help="Geo-conditioned regression: concat the hash-grid location "
                          "embedding to the input (CorrDiff-style static "
                          "conditioning); checkpoint becomes directmap_geo.pt.")
-    ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
     ap.add_argument("--random-ratio", action="store_true",
@@ -119,9 +119,8 @@ def main():
         return model(x, None, c) if geo_on else model(x)
 
     start_epoch, step = 1, 0
-    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
     stem = "meanmap" if args.random_ratio else "directmap"
-    ckpt_path = ckpt_dir / f"{stem}{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}.pt"
+    ckpt_path = ckpt_dir / f"{stem}{geo_suffix(cfg)}.pt"
     if args.resume and ckpt_path.exists():
         ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
