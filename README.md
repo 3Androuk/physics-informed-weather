@@ -13,14 +13,35 @@ zero-shot high-resolution inference. Also includes a FourCastNet inference demo.
 
 → See [`fno-afno-baselines/README.md`](fno-afno-baselines/README.md).
 
-### [`era5-diffusion-downscaling/`](era5-diffusion-downscaling/) — Diffusion super-resolution (Phase 1)
-A reimplementation of the physics-agnostic core of Shu, Li & Barati Farimani
-(2023), *"A physics-informed diffusion model for high-fidelity flow field
-reconstruction"* (J. Comput. Phys. 478, 111972), applied to ERA5 Z500
-downscaling. A single DDPM, trained on high-fidelity patches only, reconstructs
-across 4× and 8× degradations without retraining.
+### [`era5-diffusion-downscaling/`](era5-diffusion-downscaling/) — Generative super-resolution of ERA5
+Started as a reimplementation of the physics-agnostic core of Shu, Li & Barati
+Farimani (2023) — a single DDPM trained on high-fidelity patches only, guided at
+inference to reconstruct 4×/8× degradations without retraining — and has grown
+into a comparison suite of generative downscaling methods:
 
-→ See [`era5-diffusion-downscaling/README.md`](era5-diffusion-downscaling/README.md).
+- **Guided unconditional DDPM** (the Shu et al. reimplementation, Phase 1)
+- **Conditional transport models** — flow matching and stochastic interpolants,
+  trained on randomized degradation ratios, evaluated at a held-out 16×
+- **Residual (split-model) diffusion** — CorrDiff-style learned mean + sampled
+  residual
+- **Geographic conditioning** — learned sphere-native location embeddings
+  (Instant-NGP hash grid, HEALPix pyramid) vs zero-parameter baselines
+  (raw coordinates, fixed sinusoidal basis, real orography/land-sea static
+  fields), with a permutation control
+- **Full-field reconstruction** — patch-trained models applied to whole
+  lat-band fields: direct inference, overlap-blend tiling with shared noise and
+  exact data-consistency projection, and MultiDiffusion-style per-step fusion
+
+→ See [`era5-diffusion-downscaling/README.md`](era5-diffusion-downscaling/README.md)
+for methods, commands, and references.
+
+## Branch guide
+
+| branch | contents |
+|---|---|
+| `main` | original Phase-1 state (guided DDPM + baselines, single variable) |
+| `codex/flow-stochastic-superres` | **active development**: everything listed above, single-variable configs (t2m, z500). Supersedes `worktree-geo-hash-encoding` (its full history is contained here). |
+| `claude/wb2-20var-downscaling` | everything above **plus multivariable downscaling**: 20 WB2 variables as 20 input/output channels (`config/wb2_20var.yaml`), per-channel normalization, display-channel evaluation |
 
 ## Layout
 
@@ -29,7 +50,7 @@ physics-informed-weather/
 ├── README.md                     # this file
 ├── .gitignore                    # shared ignores (caches, checkpoints, venvs)
 ├── fno-afno-baselines/           # FNO/AFNO forecasting baselines
-└── era5-diffusion-downscaling/   # diffusion downscaling reimplementation
+└── era5-diffusion-downscaling/   # generative downscaling suite
 ```
 
 Each subproject is run from inside its own folder (paths like `cache/`,
