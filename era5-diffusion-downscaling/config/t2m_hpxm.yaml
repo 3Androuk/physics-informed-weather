@@ -1,0 +1,159 @@
+# LADDER-MATCHED HEALPix experiment (see PROJECT_CONTEXT diagnosis 2026-08-14).
+# The original healpix run used Nside 1..128: three levels at/above the 32-deg
+# patch span (dead weight) and a 0.458-deg finest level that violates the
+# ~150 km cap this file itself establishes for the hash. This config gives
+# HEALPix the SAME scale band and density as the hash (7.3->0.92 deg, b~1.35)
+# via a ring-scheme integer ladder: 8,11,14,20,26,35,48,64. ~219k dense params.
+# Precompute: python -m data.make_healpix_index --config config/t2m_hpxm.yaml
+# Train:      python -m train.train_diffusion --config config/t2m_hpxm.yaml --wandb --geo
+#             No --seed flag: config seed 42 already matches the originals' RNG,
+#             and like them the checkpoint carries no seed suffix. It trains in
+#             THIS checkout as diffusion_geo_hpx.pt; the original Nside-1..128
+#             model is symlinked alongside as diffusion_geo_hpx_n128.pt so the
+#             head-to-head eval can address both.
+
+# 2m temperature variant — surface variable with strong geographic imprint
+# (orography via lapse rate, land-sea contrast), the fair test for the
+# geo-conditioning hypothesis. All paths are separate from the Z500 runs so
+# neither data nor checkpoints can clobber each other.
+
+seed: 42
+
+paths:
+  raw_dir: datasets/raw_t2m
+  patch_dir: datasets/patches_t2m
+  ckpt_dir: checkpoints_t2m
+  results_dir: results_t2m
+  log_dir: results_t2m/tb
+
+data:
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
+  gcs_token: anon
+  variable: 2m_temperature
+  level: null                    # surface variable — no pressure level to select
+  train_years: [2007, 2015]
+  test_years: [2016, 2017]
+  time_stride: 4                 # every 24h at a fixed hour (avoids diurnal aliasing)
+
+patches:
+  size: 128
+  per_field: 8
+  lat_range: [-60.0, 60.0]
+
+normalize:
+  method: zscore
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: linear
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+
+transport:
+  train_ratios: [2, 4, 8]
+  eval_ratios: [4, 8, 16]         # 16x is held out during training
+  time_scale: 1000.0
+  time_epsilon: 1.0e-4
+  sample_steps: 100
+  solver: heun
+  projection: final
+  stochastic_interpolant:
+    gamma: 0.5
+    score_weight: 1.0
+    sampler: ode
+    stochasticity: 0.1
+
+unet:
+  in_channels: 1
+  out_channels: 1
+  base_channels: 64
+  channel_mults: [1, 2, 4, 8]
+  num_res_blocks: 2
+  time_emb_dim: 256
+  attn_resolutions: [16]
+  dropout: 0.1
+  groupnorm_groups: 32
+
+# Coarser encoder than the Z500 runs: the fine levels there (res up to 512)
+# overfit train-year anomalies (val loss got worse while fine-level table
+# weights grew large). Static geography is smooth — cap the cells at ~150 km.
+geo:
+  enabled: true
+  # Learned encoders: "hash" (Instant-NGP cube grid, default) or "healpix"
+  # (dense equal-area spherical pyramid — no hash collisions; precompute once:
+  # python -m data.make_healpix_index --config config/t2m.yaml).
+  # Comparison baselines (zero learned geographic parameters):
+  #   "xyz"        raw unit-sphere coordinates as channels (trivial baseline)
+  #   "sinusoidal" fixed multiscale Fourier basis of the coordinates
+  #   "static"     real physiographic fields (orography, land-sea mask, ...);
+  #                precompute once: python -m data.make_static_fields --config ...
+  encoder: healpix
+  sinusoidal_n_frequencies: 3      # sinusoidal: output_dim = input_dim * 2 * n
+  static_fields:                   # static: WB2 zarr variables, in channel order
+    - geopotential_at_surface
+    - land_sea_mask
+    - slope_of_sub_gridscale_orography
+  healpix_n_levels: 8
+  healpix_nside_min: 8             # coarsest ~7.3 deg — patch-scale, like hash level 0
+  healpix_nside_max: 64            # finest ~0.92 deg ~ 100 km — honors the cap
+  healpix_index: healpix_index_m8_64.npz   # ladder-specific precompute
+  input_dim: 3
+  n_levels: 8
+  n_features_per_level: 2
+  log2_hashmap_size: 19
+  base_resolution: 16
+  finest_resolution: 128
+  altitude: null
+
+# Split-model Phase A: conditional diffusion on the residual HF - bicubic,
+# ratio randomized per batch; test at a held-out divisor (16) for generalization.
+residual:
+  train_ratios: [2, 4, 8]
+  n_steps: 100                     # DDIM steps when sampling the residual
+
+train:
+  batch_size: 16
+  epochs: 200
+  lr: 2.0e-4
+  weight_decay: 0.0
+  grad_clip: 1.0
+  amp: false
+  ema_decay: 0.999
+  num_workers: 4
+  log_every: 50
+  val_patches: 256
+  ckpt_every_epochs: 1
+  sample_every_epochs: 10
+
+directmap:
+  train_ratio: 4
+  batch_size: 16
+  epochs: 200
+  lr: 2.0e-4
+  grad_clip: 1.0
+  amp: false
+
+sample:
+  ddim_eta: 0.0
+  guidance_strength: 0.0
+  interp: nearest
+  reconstructions:
+    - ratio: 4
+      K: 3
+      t_steps: [160, 114, 80]
+      smooth_sigma: 0.0
+    - ratio: 8
+      K: 1
+      t_steps: [320]
+      smooth_sigma: 5.0
+
+eval:
+  n_test_patches: 256
+  spectrum_bins: null
+  hist_bins: 100
+
+wandb:
+  enabled: false
+  project: era5-diffusion-downscaling
+  entity: null
+  name: null

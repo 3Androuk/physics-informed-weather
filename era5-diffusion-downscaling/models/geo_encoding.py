@@ -155,12 +155,20 @@ class MultiResHashGrid(nn.Module):
 
 
 def healpix_nside_ladder(n_levels: int, nside_min: int = 1, nside_max: int = 128):
-    """Geometric ladder of valid HEALPix Nside values (powers of two).
+    """Geometric ladder of integer HEALPix Nside values.
+
+    The RING scheme (the only one used here — see data/make_healpix_index.py)
+    accepts ANY integer Nside; powers of two are only required for NESTED. A
+    geometric-integer ladder lets the scale band and per-octave density match
+    the hash grid's (e.g. 8..64 over 8 levels ~ b=1.35), instead of being
+    locked to one-octave jumps. Backward compatible: (1, 128, 8 levels) still
+    yields the power-of-two ladder 1,2,4,...,128, so existing checkpoints and
+    the default healpix_index.npz are unaffected.
 
     Shared by the encoder and data/make_healpix_index.py so the precomputed
     indices and the tables can never disagree about level resolutions."""
-    exps = np.round(np.linspace(np.log2(nside_min), np.log2(nside_max), n_levels)).astype(int)
-    nsides = [int(2 ** e) for e in exps]
+    ladder = np.exp(np.linspace(np.log(nside_min), np.log(nside_max), n_levels))
+    nsides = [int(np.rint(x)) for x in ladder]
     assert all(b > a for a, b in zip(nsides, nsides[1:])), (
         f"non-increasing Nside ladder {nsides}: reduce n_levels or widen the "
         f"[nside_min, nside_max] range")
