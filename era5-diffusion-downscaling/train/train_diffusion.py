@@ -75,6 +75,8 @@ def main():
             coords_full_path=patch_dir / "coords_full.npz",
             geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
             geo_encoder=gcfg.get("encoder", "hash"),
+            healpix_index_path=((patch_dir / gcfg["healpix_index"])
+                                if gcfg.get("healpix_index") else None),
         )
     else:
         ds = PatchDataset(patch_dir / "train_patches.npy", normalizer)
@@ -101,6 +103,8 @@ def main():
                 coords_full_path=patch_dir / "coords_full.npz",
                 geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
                 geo_encoder=gcfg.get("encoder", "hash"),
+            healpix_index_path=((patch_dir / gcfg["healpix_index"])
+                                if gcfg.get("healpix_index") else None),
             )
         else:
             val_ds = PatchDataset(test_path, normalizer)
