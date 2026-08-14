@@ -126,8 +126,15 @@ def main():
                         ("Stochastic interpolant", args.si_ckpt)):
         p = ckpt_dir / name
         if p.exists():
-            model, process, cfg_ck, method = load_transport(p, device)
-            methods[label] = ("transport", (model, process, cfg_ck, method),
+            model, process, cfg_ck, method, residual = load_transport(p, device)
+            mean_geo_full = None
+            if residual is not None:
+                label += " (residual)"
+                if residual["mean_geo"]:  # geo-conditioned frozen mean
+                    mean_geo_full = _geo_full({"geo": residual["mean_geo_cfg"]},
+                                              patch_dir, hf_all.shape[-2:], device)
+            methods[label] = ("transport",
+                              (model, process, cfg_ck, method, residual, mean_geo_full),
                               _geo_full(cfg_ck, patch_dir, hf_all.shape[-2:], device))
             stems.append(p.stem)
             print(f"  {label} checkpoint: {p} (epoch {_epoch_of(p)})")
@@ -251,29 +258,44 @@ def _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse, ratio, rc, eta,
             overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
             project_steps=args.project_steps, project_final=project, generator=gen)
     if kind == "transport":
-        model, process, cfg_ck, method = payload
+        model, process, cfg_ck, method, residual, mean_geo_full = payload
         tc = cfg_ck.get("transport", {})
+        # Residual transport checkpoints condition on the mean field and sample
+        # the normalized residual: coarsen(x) == observation holds only for the
+        # COMPOSED field, so any projection moves outside the sampler.
+        cond_full = (lf_plain if residual is None
+                     else _mean_full(hf, ratio, residual, mean_geo_full))
+        inner_project = project and residual is None
         if mode == "direct":
             kwargs = dict(coords=_geo_batched(geo), steps=tc.get("sample_steps", 100),
                           solver=tc.get("solver", "heun"),
-                          project="final" if project else "none",
-                          coarse=coarse if project else None,
-                          ratio=ratio if project else None)
+                          project="final" if inner_project else "none",
+                          coarse=coarse if inner_project else None,
+                          ratio=ratio if inner_project else None)
             if method == "stochastic_interpolant":
                 si = tc.get("stochastic_interpolant", {})
                 kwargs.update(sampler=si.get("sampler", "ode"),
                               stochasticity=si.get("stochasticity", 0.1))
-            return process.sample(model, lf_plain, **kwargs)
-        if mode == "fused":
-            return reconstruct_full_fused_transport(
-                model, process, lf_plain, coarse, ratio, cfg_ck, method, tile=tile,
+            out = process.sample(model, cond_full, **kwargs)
+        elif mode == "fused":
+            out = reconstruct_full_fused_transport(
+                model, process, cond_full, coarse, ratio, cfg_ck, method, tile=tile,
                 overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
-                project_final=project, project_each=args.project_steps,
+                project_final=inner_project,
+                project_each=args.project_steps and residual is None,
                 generator=gen)
-        return reconstruct_full_tiled_transport(
-            model, process, lf_plain, coarse, ratio, cfg_ck, method, tile=tile,
-            overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
-            project_final=project, project_each=args.project_steps, generator=gen)
+        else:
+            out = reconstruct_full_tiled_transport(
+                model, process, cond_full, coarse, ratio, cfg_ck, method, tile=tile,
+                overlap=args.overlap, batch=args.batch_tiles, geo_full=geo,
+                project_final=inner_project,
+                project_each=args.project_steps and residual is None,
+                generator=gen)
+        if residual is not None:
+            out = cond_full + residual["res_std"] * out
+            if project:
+                out = _project_final(out, coarse, ratio)
+        return out
     if kind == "directmap":
         (model,) = payload
         if mode == "direct":
@@ -317,6 +339,20 @@ def _geo_full(cfg_ck, patch_dir, hw, device):
 def _geo_batched(geo):
     """Add the batch dim for a single-field direct pass."""
     return None if geo is None else geo[None]
+
+
+@torch.no_grad()
+def _mean_full(hf, ratio, residual, mean_geo_full):
+    """Full-field deterministic mean for residual transport checkpoints:
+    the frozen learned regression (full-field pass), or bicubic."""
+    if residual["mean_model"] is not None:
+        x = degrade(hf, ratio)
+        m = residual["mean_model"]
+        return (m(x, None, _geo_batched(mean_geo_full))
+                if residual["mean_geo"] else m(x))
+    h, w = hf.shape[-2:]
+    return F.interpolate(coarsen(hf, ratio), size=(h, w), mode="bicubic",
+                         align_corners=False)
 
 
 def _epoch_of(ckpt_path):
