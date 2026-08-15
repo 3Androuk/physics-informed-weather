@@ -126,6 +126,8 @@ def _payload(patch_dir, normalizer, n, cfg, device):
         coords_full_path=patch_dir / "coords_full.npz",
         geo_input_dim=g["input_dim"], altitude=g.get("altitude"),
         geo_encoder=g.get("encoder", "hash"),
+        healpix_index_path=((patch_dir / g["healpix_index"])
+                            if g.get("healpix_index") else None),
     )
     return torch.stack([ds[i][1] for i in range(n)]).to(device)
 
