@@ -105,6 +105,8 @@ def main():
         print(f"Val patches: {n_val}")
 
     if geo_on:
+        # No level gate: the direct map has no diffusion time input (t=None),
+        # so noise-dependent gating is undefined for this model.
         from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
         geo_enc = build_geo_encoder(cfg)
         base = build_unet(cfg, use_time=False, extra_in_channels=geo_enc.output_dim)

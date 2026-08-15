@@ -52,6 +52,9 @@ def main():
     ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
+    ap.add_argument("--gated", action="store_true",
+                    help="Force geo.level_gating: true — noise-dependent gating "
+                         "of the embedding levels; checkpoint gains _gated.")
     ap.add_argument("--mean-ckpt", default=None,
                     help="Checkpoint name (in paths.ckpt_dir) of a frozen learned "
                          "regression mean (train_directmap --random-ratio -> "
@@ -65,6 +68,8 @@ def main():
         cfg.setdefault("geo", {})["enabled"] = True
     if args.encoder is not None:
         cfg.setdefault("geo", {})["encoder"] = args.encoder
+    if args.gated:
+        cfg.setdefault("geo", {})["level_gating"] = True
     if args.seed is not None:
         cfg["seed"] = args.seed
     set_seed(cfg["seed"])

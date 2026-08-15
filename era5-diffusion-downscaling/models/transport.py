@@ -25,10 +25,11 @@ class ConditionalTransportUNet(nn.Module):
     """UNet vector field conditioned on LF input and optional geography."""
 
     def __init__(self, base_unet: nn.Module, time_scale: float = 1000.0,
-                 geo_encoder: nn.Module | None = None):
+                 geo_encoder: nn.Module | None = None, level_gate=None):
         super().__init__()
         self.unet = base_unet
         self.geo = geo_encoder
+        self.gate = level_gate
         self.time_scale = float(time_scale)
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, cond):
@@ -37,8 +38,11 @@ class ConditionalTransportUNet(nn.Module):
         if self.geo is not None:
             if coords is None:
                 raise ValueError("geo-conditioned transport model needs coordinates")
-            emb = self.geo(coords).permute(0, 3, 1, 2).contiguous()
-            chans.append(emb)
+            emb = self.geo(coords)
+            if self.gate is not None:
+                # transport time runs 0 (noise) -> 1 (data): t IS the signal fraction
+                emb = self.gate(emb, t.float().clamp(0.0, 1.0))
+            chans.append(emb.permute(0, 3, 1, 2).contiguous())
         return self.unet(torch.cat(chans, dim=1), t * self.time_scale)
 
 
@@ -48,11 +52,12 @@ def build_transport_model(cfg: dict, method: str) -> ConditionalTransportUNet:
         raise ValueError(f"unknown transport method: {method}")
     geo_on = cfg.get("geo", {}).get("enabled", False)
     if geo_on:
-        from models.geo_encoding import build_geo_encoder
+        from models.geo_encoding import build_geo_encoder, build_level_gate
         geo_encoder = build_geo_encoder(cfg)
         geo_channels = geo_encoder.output_dim
+        level_gate = build_level_gate(cfg)
     else:
-        geo_encoder, geo_channels = None, 0
+        geo_encoder, geo_channels, level_gate = None, 0, None
 
     # Current field + the C-channel LF conditioning + optional geo embedding.
     # Stochastic interpolants predict [velocity, scaled_score].
@@ -64,7 +69,8 @@ def build_transport_model(cfg: dict, method: str) -> ConditionalTransportUNet:
     base = build_unet(model_cfg, use_time=True,
                       extra_in_channels=cfg["unet"]["in_channels"] + geo_channels)
     return ConditionalTransportUNet(
-        base, cfg.get("transport", {}).get("time_scale", 1000.0), geo_encoder
+        base, cfg.get("transport", {}).get("time_scale", 1000.0), geo_encoder,
+        level_gate=level_gate,
     )
 
 

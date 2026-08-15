@@ -22,10 +22,12 @@ def load_diffusion(ckpt_path, device, use_ema=True):
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
     if cfg.get("geo", {}).get("enabled", False):
-        from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
+        from models.geo_encoding import (GeoConditionedUNet, build_geo_encoder,
+                                         build_level_gate)
         geo_enc = build_geo_encoder(cfg)
         base = build_unet(cfg, use_time=True, extra_in_channels=geo_enc.output_dim)
-        model = GeoConditionedUNet(base, geo_enc)
+        model = GeoConditionedUNet(base, geo_enc, level_gate=build_level_gate(cfg),
+                                   ddpm_timesteps=cfg["diffusion"]["timesteps"])
     else:
         model = build_unet(cfg, use_time=True)
     model.load_state_dict(ck["ema"] if (use_ema and "ema" in ck) else ck["model"])

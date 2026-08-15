@@ -119,6 +119,96 @@ class SuffixTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             geo_suffix({"geo": {"enabled": True, "encoder": "nope"}})
 
+    def test_geo_suffix_gated(self):
+        self.assertEqual(geo_suffix({"geo": {"enabled": True, "encoder": "hash",
+                                             "level_gating": True}}),
+                         "_geo_gated")
+        self.assertEqual(geo_suffix({"geo": {"enabled": True,
+                                             "encoder": "hash_static",
+                                             "level_gating": True}}),
+                         "_geo_combo_gated")
+
+
+class LevelGateTests(unittest.TestCase):
+    """Noise-dependent gating of leveled embeddings (--gated)."""
+
+    def test_build_level_gate(self):
+        from models.geo_encoding import build_level_gate
+        self.assertIsNone(build_level_gate(geo_cfg("hash")))
+        for encoder in ("hash", "healpix", "hash_static"):
+            gate = build_level_gate(geo_cfg(encoder, level_gating=True))
+            self.assertIsNotNone(gate, encoder)
+            self.assertEqual(sum(p.numel() for p in gate.parameters()), 0)
+        for encoder in ("xyz", "sinusoidal", "static"):
+            with self.assertRaises(ValueError):
+                build_level_gate(geo_cfg(encoder, level_gating=True))
+
+    def test_gates_open_monotonically_with_signal(self):
+        from models.geo_encoding import LevelGate
+        gate = LevelGate(n_levels=4, n_features_per_level=2)
+        emb = torch.ones(3, 4, 4, 8)
+        # u=1 (clean data): every level essentially open
+        out_clean = gate(emb, torch.ones(3))
+        self.assertTrue((out_clean > 0.97).all())
+        # mid-denoising: coarse levels more open than fine levels
+        out_mid = gate(emb, torch.full((3,), 0.3))
+        per_level = out_mid[0, 0, 0].view(4, 2)[:, 0]
+        self.assertTrue((per_level[:-1] >= per_level[1:]).all())
+        self.assertGreater(per_level[0], 0.9)   # coarsest: open
+        self.assertLess(per_level[-1], 0.1)     # finest: shut at u=0.3
+        # u=0 (pure noise): only the c_0=0 level is half open
+        out_noise = gate(emb, torch.zeros(3))
+        self.assertLess(out_noise[..., 2:].max(), 0.5)
+
+    def test_static_tail_passes_ungated(self):
+        from models.geo_encoding import LevelGate
+        # hash_static: gate the first L*F channels, leave the S-field tail
+        gate = LevelGate(n_levels=4, n_features_per_level=2, gated_dim=8)
+        emb = torch.rand(2, 4, 4, 10)  # 8 hash + 2 static
+        out = gate(emb, torch.zeros(2))
+        self.assertTrue(torch.equal(out[..., 8:], emb[..., 8:]))
+        self.assertFalse(torch.equal(out[..., :8], emb[..., :8]))
+
+    def test_gated_models_forward(self):
+        from models.geo_encoding import (GeoConditionedUNet, build_geo_encoder,
+                                         build_level_gate)
+        from models.unet import build_unet
+        torch.manual_seed(0)
+        # DDPM wrapper: t in [1, T], u = 1 - t/T
+        cfg = geo_cfg("hash", level_gating=True)
+        geo_enc = build_geo_encoder(cfg)
+        base = build_unet(cfg, use_time=True,
+                          extra_in_channels=geo_enc.output_dim)
+        model = GeoConditionedUNet(base, geo_enc,
+                                   level_gate=build_level_gate(cfg),
+                                   ddpm_timesteps=100)
+        x = torch.randn(2, 1, 16, 16)
+        coords = torch.rand(2, 16, 16, 3)
+        out = model(x, torch.tensor([1.0, 99.0]), coords)
+        self.assertEqual(out.shape, x.shape)
+        self.assertTrue(torch.isfinite(out).all())
+        # transport: t IS the signal fraction; builder wires the gate itself
+        tmodel = build_transport_model(cfg, "flow")
+        self.assertIsNotNone(tmodel.gate)
+        tout = tmodel(x, torch.rand(2), (torch.randn(2, 1, 16, 16), coords))
+        self.assertEqual(tout.shape, x.shape)
+        self.assertTrue(torch.isfinite(tout).all())
+
+    def test_gated_residual_model_forward(self):
+        from models.residual import build_residual_model
+        torch.manual_seed(0)
+        cfg = geo_cfg("hash", level_gating=True)
+        cfg["diffusion"] = {"timesteps": 50, "beta_schedule": "cosine"}
+        model = build_residual_model(cfg)
+        self.assertIsNotNone(model.gate)
+        self.assertEqual(model.ddpm_timesteps, 50)
+        x = torch.randn(2, 1, 16, 16)
+        mean_f = torch.randn(2, 1, 16, 16)
+        coords = torch.rand(2, 16, 16, 3)
+        out = model(x, torch.tensor([1.0, 49.0]), (mean_f, coords))
+        self.assertEqual(out.shape, x.shape)
+        self.assertTrue(torch.isfinite(out).all())
+
 
 class StaticDatasetTests(unittest.TestCase):
     def test_patch_dataset_static_payload(self):

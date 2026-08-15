@@ -26,17 +26,23 @@ class ResidualConditionalUNet(nn.Module):
     sample_unconditional, which pass `cond` through to the model unchanged.
     """
 
-    def __init__(self, base_unet: nn.Module, geo_encoder=None):
+    def __init__(self, base_unet: nn.Module, geo_encoder=None, level_gate=None,
+                 ddpm_timesteps=None):
         super().__init__()
         self.unet = base_unet
         self.geo = geo_encoder
+        self.gate = level_gate
+        self.ddpm_timesteps = ddpm_timesteps
 
     def forward(self, x_t, t, cond):
         mean_field, coords = cond
         chans = [x_t, mean_field]
         if self.geo is not None:
-            emb = self.geo(coords).permute(0, 3, 1, 2).contiguous()
-            chans.append(emb)
+            emb = self.geo(coords)
+            if self.gate is not None and t is not None and self.ddpm_timesteps:
+                u = 1.0 - t.float() / self.ddpm_timesteps
+                emb = self.gate(emb, u.clamp(0.0, 1.0))
+            chans.append(emb.permute(0, 3, 1, 2).contiguous())
         return self.unet(torch.cat(chans, dim=1), t)
 
 
@@ -44,11 +50,13 @@ def build_residual_model(cfg: dict) -> ResidualConditionalUNet:
     geo_on = cfg.get("geo", {}).get("enabled", False)
     mean_channels = cfg["unet"]["in_channels"]  # mean field has one channel per variable
     if geo_on:
-        from models.geo_encoding import build_geo_encoder
+        from models.geo_encoding import build_geo_encoder, build_level_gate
         geo_enc = build_geo_encoder(cfg)
+        gate = build_level_gate(cfg)
         extra = mean_channels + geo_enc.output_dim
     else:
-        geo_enc = None
+        geo_enc, gate = None, None
         extra = mean_channels
     base = build_unet(cfg, use_time=True, extra_in_channels=extra)
-    return ResidualConditionalUNet(base, geo_enc)
+    return ResidualConditionalUNet(base, geo_enc, level_gate=gate,
+                                   ddpm_timesteps=cfg["diffusion"]["timesteps"])

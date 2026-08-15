@@ -30,6 +30,9 @@ def _parser(method: str):
     ap.add_argument("--geo", action="store_true",
                     help="Enable the configured geographic encoder.")
     ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None)
+    ap.add_argument("--gated", action="store_true",
+                    help="Force geo.level_gating: true — noise-dependent gating "
+                         "of the embedding levels; checkpoint gains _gated.")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--residual", action="store_true",
                     help="Transport the RESIDUAL (y - mean)/res_std instead of the "
@@ -54,6 +57,8 @@ def run(method: str):
         cfg.setdefault("geo", {})["enabled"] = True
     if args.encoder is not None:
         cfg.setdefault("geo", {})["encoder"] = args.encoder
+    if args.gated:
+        cfg.setdefault("geo", {})["level_gating"] = True
     if args.seed is not None:
         cfg["seed"] = args.seed
     set_seed(cfg["seed"])
