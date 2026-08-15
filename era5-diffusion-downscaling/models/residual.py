@@ -58,5 +58,6 @@ def build_residual_model(cfg: dict) -> ResidualConditionalUNet:
         geo_enc, gate = None, None
         extra = mean_channels
     base = build_unet(cfg, use_time=True, extra_in_channels=extra)
-    return ResidualConditionalUNet(base, geo_enc, level_gate=gate,
-                                   ddpm_timesteps=cfg["diffusion"]["timesteps"])
+    return ResidualConditionalUNet(
+        base, geo_enc, level_gate=gate,
+        ddpm_timesteps=cfg.get("diffusion", {}).get("timesteps"))

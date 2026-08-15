@@ -63,7 +63,7 @@ The learned location tables (`--encoder hash|healpix`) are compared against a
 ladder of baselines that isolate what, if anything, the *learning* contributes
 (all selectable via `--geo --encoder <name>` on every trainer; checkpoint names
 gain matching suffixes `_geo`, `_geo_hpx`, `_geo_xyz`, `_geo_sin`,
-`_geo_static`):
+`_geo_static`, `_geo_combo`):
 
 | encoder      | payload                              | learned geo params | isolates |
 |--------------|--------------------------------------|--------------------|----------|
@@ -77,6 +77,49 @@ gain matching suffixes `_geo`, `_geo_hpx`, `_geo_xyz`, `_geo_sin`,
 `python -m data.make_static_fields --config config/t2m.yaml` (a few MB from
 the same WB2 zarr). The `--shuffle-geo` permutation control in
 `eval.make_tables_figures` applies to every arm.
+
+Leveled encoders (`hash`, `healpix`, `hash_static`) additionally accept
+`--gated` (config: `geo.level_gating`): noise-dependent gating that hides the
+fine embedding levels at high noise, so fine-table gradient comes only from
+denoising steps where location detail is actually resolvable — a
+zero-parameter regularizer against fine-scale location memorization
+(checkpoint suffix `_gated`).
+
+#### Findings (guided DDPM, t2m, projected reconstruction)
+
+Measured on the deterministic test-patch set, 4× ratio (L2 in K after
+denormalization; spectrum = mean |log10| radial-spectrum error):
+
+| arm | L2 | spectrum |
+|---|---|---|
+| bicubic | 0.4559 | 0.0691 |
+| no geo | 0.4052 | 0.0101 |
+| `xyz` | 0.4061 | 0.0123 |
+| `sinusoidal` | 0.4112 | 0.0233 |
+| `hash` (learned) | 0.3526 | 0.0086 |
+| `static` (physiography) | 0.3478 | 0.0100 |
+
+- **The geographic gain is real (~13 % L2) but encoder-invariant at the top.**
+  `hash`, `static`, and the ring-matched `healpix` ladder (Nside 8–64, i.e.
+  scales matched to the hash band) all land within noise of each other, at 8×
+  as well as 4×. The learned tables converge to a *physiography-equivalent*
+  signal — they earn their keep only where a static descriptor of the surface
+  would too.
+- **Raw coordinates are a null** (`xyz` ≈ no-geo): the UNet cannot exploit
+  location identity without a multiscale representation.
+- **A fixed Fourier basis actively hurts the spectrum** (`sinusoidal`,
+  2.3× worse than no-geo): globally-supported oscillatory channels leak into
+  the generated high frequencies.
+- **Scale misallocation, not spherical geometry, explained the original
+  HEALPix gap.** The original power-of-two ladder (Nside 1–128) spent levels
+  outside the useful band and underperformed; matching the ladder to the hash
+  band recovers hash parity with zero other changes. This kills the case for
+  more elaborate spherical parameterizations (icosphere / cubed-sphere hash)
+  as a route to accuracy on this task.
+
+Pending before these become thesis-final: the `hash_static` combo arm (does
+learning add anything *on top of* physiography?), seed replicates for the
+~0.005-L2 gaps, and the `--gated` ablation.
 
 ## Multivariable (20-channel) downscaling
 

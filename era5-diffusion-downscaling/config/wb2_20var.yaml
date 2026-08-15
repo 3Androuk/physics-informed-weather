@@ -101,6 +101,15 @@ geo:
   base_resolution: 16
   finest_resolution: 128
   altitude: null
+  # Noise-dependent level gating (--gated): multiply embedding level l by
+  # sigmoid((u - c_l) / width) where u is the signal fraction (DDPM: 1 - t/T;
+  # transport: t) and c_l = l/(L-1) * c_max — fine levels fade out at high
+  # noise so early denoising can't lean on (memorize) fine-scale features.
+  # Zero parameters; applies to leveled encoders (hash, healpix, hash_static —
+  # static tail stays ungated). Checkpoint suffix gains "_gated".
+  level_gating: false
+  gating_c_max: 0.6                # threshold of the finest level (coarsest = 0)
+  gating_width: 0.1                # sigmoid softness
 
 residual:
   train_ratios: [2, 4, 8]
