@@ -80,6 +80,23 @@ class EncoderTests(unittest.TestCase):
             build_geo_encoder(geo_cfg("nope"))
 
 
+class LadderTests(unittest.TestCase):
+    def test_pow2_ladder_backward_compatible(self):
+        from models.geo_encoding import healpix_nside_ladder
+        self.assertEqual(healpix_nside_ladder(8, 1, 128),
+                         [1, 2, 4, 8, 16, 32, 64, 128])
+
+    def test_integer_ring_ladder_matches_hash_band(self):
+        from models.geo_encoding import healpix_nside_ladder
+        self.assertEqual(healpix_nside_ladder(8, 8, 64),
+                         [8, 11, 14, 20, 26, 35, 48, 64])
+
+    def test_non_increasing_ladder_rejected(self):
+        from models.geo_encoding import healpix_nside_ladder
+        with self.assertRaises(AssertionError):
+            healpix_nside_ladder(16, 8, 16)  # too many levels for the range
+
+
 class SuffixTests(unittest.TestCase):
     def test_geo_suffix(self):
         self.assertEqual(geo_suffix({"geo": {"enabled": False}}), "")

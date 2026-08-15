@@ -290,6 +290,8 @@ def _geo_dataset_kwargs(cfg, patch_dir, split):
         coords_full_path=patch_dir / "coords_full.npz",
         geo_input_dim=g["input_dim"], altitude=g.get("altitude"),
         geo_encoder=g.get("encoder", "hash"),
+        healpix_index_path=((patch_dir / g["healpix_index"])
+                            if g.get("healpix_index") else None),
     )
 
 

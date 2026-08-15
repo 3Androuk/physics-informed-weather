@@ -307,7 +307,7 @@ def _geo_full(cfg_ck, patch_dir, hw, device):
     h, w = hw
     encoder = g.get("encoder", "hash")
     if encoder == "healpix":
-        hp = np.load(patch_dir / "healpix_index.npz")
+        hp = np.load(patch_dir / g.get("healpix_index", "healpix_index.npz"))
         idx = torch.from_numpy(hp["idx"][:, :h, :w, :].astype(np.float32))
         wts = torch.from_numpy(np.ascontiguousarray(hp["w"][:, :h, :w, :]))
         return torch.cat([idx, wts], dim=-1).to(device)
