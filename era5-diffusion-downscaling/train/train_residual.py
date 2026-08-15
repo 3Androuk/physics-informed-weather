@@ -49,7 +49,7 @@ def main():
                          "embedding as well.")
     ap.add_argument("--seed", type=int, default=None,
                     help="Override config seed; suffixes the checkpoint name.")
-    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
     ap.add_argument("--mean-ckpt", default=None,

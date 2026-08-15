@@ -48,7 +48,8 @@ _VAR_SHORT = {"2m_temperature": "t2m", "geopotential": "z500"}
 # existing checkpoint names like diffusion_geo.pt / diffusion_geo_hpx.pt are
 # unchanged).
 _ENCODER_TAG = {"hash": "", "healpix": "_hpx", "xyz": "_xyz",
-                "sinusoidal": "_sin", "static": "_static"}
+                "sinusoidal": "_sin", "static": "_static",
+                "hash_static": "_combo"}
 
 
 def geo_suffix(cfg: dict) -> str:

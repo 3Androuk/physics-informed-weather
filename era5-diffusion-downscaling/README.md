@@ -70,6 +70,7 @@ gain matching suffixes `_geo`, `_geo_hpx`, `_geo_xyz`, `_geo_sin`,
 | `xyz`        | raw unit-sphere coords as channels   | 0                  | is *any* encoder needed beyond coordinates? |
 | `sinusoidal` | fixed multiscale Fourier basis       | 0                  | learned tables vs engineered multiscale basis |
 | `static`     | real orography / land-sea mask / slope (WB2) | 0          | learned location identity vs physiography (the literature default) |
+| `hash_static` | static fields + learned hash table | ~0.5M             | does learning add anything ON TOP of physiography? (the tie-breaker) |
 | `hash`, `healpix` | learned multiresolution tables  | ~0.5M              | — |
 
 `static` needs a one-time precompute:

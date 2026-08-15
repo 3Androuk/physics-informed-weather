@@ -311,16 +311,21 @@ def _geo_full(cfg_ck, patch_dir, hw, device):
         idx = torch.from_numpy(hp["idx"][:, :h, :w, :].astype(np.float32))
         wts = torch.from_numpy(np.ascontiguousarray(hp["w"][:, :h, :w, :]))
         return torch.cat([idx, wts], dim=-1).to(device)
-    if encoder == "static":
+    if encoder in ("static", "hash_static"):
         sf = np.load(patch_dir / "static_fields.npz")
         fields = np.ascontiguousarray(sf["fields"][:, :h, :w])
-        return torch.from_numpy(fields).permute(1, 2, 0).to(device)  # (h, w, S)
-    # hash / xyz / sinusoidal all consume the coordinate payload
+        static = torch.from_numpy(fields).permute(1, 2, 0)           # (h, w, S)
+        if encoder == "static":
+            return static.to(device)
+    # hash / xyz / sinusoidal / hash_static consume the coordinates
     from models.geo_encoding import build_patch_coords
     cf = np.load(patch_dir / "coords_full.npz")
     alt = g.get("altitude") if g.get("input_dim", 3) == 4 else None
-    coords = build_patch_coords(cf["lat"][:h], cf["lon"][:w], altitude=alt)
-    return torch.from_numpy(coords).to(device)
+    coords = torch.from_numpy(
+        build_patch_coords(cf["lat"][:h], cf["lon"][:w], altitude=alt))
+    if encoder == "hash_static":
+        return torch.cat([coords, static], dim=-1).to(device)        # (h, w, d+S)
+    return coords.to(device)
 
 
 def _geo_batched(geo):

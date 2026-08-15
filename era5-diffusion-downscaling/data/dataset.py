@@ -76,10 +76,11 @@ class PatchDataset(Dataset):
                 hp = np.load(hp_path)
                 self.hpx_idx = hp["idx"]   # (L, H, W, 4) int64
                 self.hpx_w = hp["w"]       # (L, H, W, 4) float32
-            elif geo_encoder == "static":
+            if geo_encoder in ("static", "hash_static"):
                 sf = np.load(Path(coords_full_path).parent / "static_fields.npz")
                 self.static = sf["fields"]  # (S, H, W) float32, normalized
-            else:  # hash / xyz / sinusoidal all consume the coordinate payload
+            if geo_encoder not in ("healpix", "static"):
+                # hash / xyz / sinusoidal / hash_static consume the coordinates
                 from models.geo_encoding import build_patch_coords  # local import
                 self._build_coords = build_patch_coords
                 self.geo_input_dim = geo_input_dim
@@ -105,7 +106,11 @@ class PatchDataset(Dataset):
             crop = np.ascontiguousarray(self.static[:, r:r + s, c:c + s])
             return x, torch.from_numpy(crop).permute(1, 2, 0)  # (s, s, S)
         alt = self.altitude if self.geo_input_dim == 4 else None
-        coords = self._build_coords(
+        coords = torch.from_numpy(self._build_coords(
             self.lat_full[r:r + s], self.lon_full[c:c + s], altitude=alt
-        )
-        return x, torch.from_numpy(coords)
+        ))
+        if self.geo_encoder == "hash_static":
+            crop = np.ascontiguousarray(self.static[:, r:r + s, c:c + s])
+            return x, torch.cat([coords, torch.from_numpy(crop).permute(1, 2, 0)],
+                                dim=-1)                        # (s, s, d + S)
+        return x, coords
