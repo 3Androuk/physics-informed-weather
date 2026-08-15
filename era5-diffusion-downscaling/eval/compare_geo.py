@@ -1,14 +1,21 @@
-"""Head-to-head comparison of two guided-diffusion checkpoints.
+"""Comparison of N guided-diffusion checkpoints on identical test patches.
 
-Originally geo-vs-baseline; now generic: EITHER checkpoint may be
-geo-conditioned (hash or healpix). Each model receives the geo payload its own
-config requires (hash coords vs healpix indices), built from the same test
-origins, so hash-geo vs healpix-geo, geo vs plain, or seed-replicate pairs all
-compare on identical test patches at every ratio, alongside bicubic. Reports
-L2 (RMSE) and the power-spectrum metric; optional per-step DDNM projection and
-ensemble metrics (ensemble-mean L2, CRPS, spread).
+Originally a geo-vs-baseline pair; now a generic ladder: pass any number of
+checkpoints via --ckpts (names in paths.ckpt_dir or absolute paths) and each
+model receives the geo payload its own config requires (hash coords, healpix
+indices, raw xyz, sinusoidal coords, or static fields), built from the same
+test origins — so the full geo-encoder ladder (no-geo, xyz, sinusoidal,
+static, hash, healpix) compares on identical patches at every ratio, alongside
+bicubic. Reports L2 (RMSE) and the power-spectrum metric; optional per-step
+DDNM projection, --shuffle-geo permutation control, and ensemble metrics
+(ensemble-mean L2, CRPS, spread).
 
-Run:
+Run (ladder):
+    python -m eval.compare_geo --config config/t2m.yaml --wandb \
+        --ckpts diffusion.pt diffusion_geo.pt diffusion_geo_hpx.pt \
+                diffusion_geo_xyz.pt diffusion_geo_sin.pt diffusion_geo_static.pt
+
+Run (legacy pair):
     python -m eval.compare_geo --config config/t2m.yaml --project \
         --geo-ckpt diffusion_geo_hpx.pt --base-ckpt diffusion_geo.pt
 """
@@ -63,16 +70,25 @@ def _payload(patch_dir, normalizer, n, geo_cfg, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/default.yaml")
+    ap.add_argument("--ckpts", nargs="+", default=None,
+                    help="N checkpoints to compare on identical patches (names in "
+                         "paths.ckpt_dir or absolute paths). Overrides "
+                         "--geo-ckpt/--base-ckpt.")
     ap.add_argument("--geo-ckpt", default="diffusion_geo.pt",
-                    help="model A checkpoint (may be geo or plain)")
+                    help="legacy pair mode: model A (may be geo or plain)")
     ap.add_argument("--base-ckpt", default="diffusion.pt",
-                    help="model B checkpoint (may be geo or plain)")
+                    help="legacy pair mode: model B (may be geo or plain)")
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
     ap.add_argument("--project", action="store_true",
                     help="Per-step data-consistency projection: coarsen(x0) == LF "
                          "enforced at every DDIM step.")
+    ap.add_argument("--shuffle-geo", action="store_true",
+                    help="Permutation control: every geo-conditioned model gets "
+                         "ANOTHER patch's geo payload (same permutation for all "
+                         "models). Genuinely geographic gains should collapse "
+                         "toward no-geo; gains that hold were capacity.")
     ap.add_argument("--ensemble", type=int, default=1,
                     help="Ensemble members per patch (>1 adds ensemble-mean L2, "
                          "CRPS, and spread on a subset of patches).")
@@ -92,34 +108,54 @@ def main():
     n = min(cfg["eval"]["n_test_patches"],
             len(PatchDataset(patch_dir / "test_patches.npy", normalizer)))
 
-    name_a = Path(args.geo_ckpt).stem
-    name_b = Path(args.base_ckpt).stem
-    model_a, diff_a, cfg_a = load_diffusion(ckpt_dir / args.geo_ckpt, device)
-    model_b, diff_b, cfg_b = load_diffusion(ckpt_dir / args.base_ckpt, device)
-    geo_a = cfg_a.get("geo", {}).get("enabled", False)
-    geo_b = cfg_b.get("geo", {}).get("enabled", False)
-    print(f"Comparing {name_a} (geo={geo_a}) vs {name_b} (geo={geo_b}) on {n} patches"
-          f"{' | projection ON' if args.project else ''}")
+    # ── Load every checkpoint; each builds the geo payload ITS config needs ─
+    ckpt_names = args.ckpts or [args.geo_ckpt, args.base_ckpt]
+    models = []   # (display name, model, diffusion, coords, encoder tag)
+    seen = {}
+    for name in ckpt_names:
+        path = ckpt_dir / name
+        model, diff, cfg_ck = load_diffusion(path, device)
+        geo_on = cfg_ck.get("geo", {}).get("enabled", False)
+        encoder = cfg_ck["geo"].get("encoder", "hash") if geo_on else "-"
+        coords = _payload(patch_dir, normalizer, n, cfg_ck["geo"], device) if geo_on else None
+        disp = Path(name).stem
+        if disp in seen:  # same stem from different directories
+            seen[disp] += 1
+            disp = f"{disp}#{seen[disp]}"
+        else:
+            seen[disp] = 1
+        models.append((disp, model, diff, coords, encoder))
+        print(f"  {disp}: {path} (geo={geo_on}, encoder={encoder})")
+    print(f"Comparing {len(models)} checkpoint(s) on {n} patches"
+          f"{' | projection ON' if args.project else ''}"
+          f"{' | SHUFFLED geo payloads' if args.shuffle_geo else ''}")
 
-    stem = f"compare_{name_a}_vs_{name_b}{'_proj' if args.project else ''}"
+    if args.shuffle_geo:
+        # One shared permutation (seeded off cfg seed) so every model sees the
+        # SAME location mismatch and the control is reproducible.
+        gen = torch.Generator().manual_seed(int(cfg["seed"]))
+        perm = torch.randperm(n, generator=gen).to(device)
+        models = [(d, m, dif, None if c is None else c[perm], e)
+                  for d, m, dif, c, e in models]
+
+    tag_names = "_vs_".join(d for d, *_ in models) if len(models) <= 2 \
+        else f"{len(models)}way"
+    stem = (f"compare_{tag_names}{'_proj' if args.project else ''}"
+            f"{'_shufgeo' if args.shuffle_geo else ''}")
 
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
     hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
-    coords_a = _payload(patch_dir, normalizer, n, cfg_a["geo"], device) if geo_a else None
-    coords_b = _payload(patch_dir, normalizer, n, cfg_b["geo"], device) if geo_b else None
 
     table, spectra = {}, {"Reference": radial_power_spectrum(hf_phys)}
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]; tag = f"{ratio}x"
-        preds = {
-            name_a: _recon(diff_a, model_a, hf, ratio, rc, eta, coords_a, args.batch,
-                           label=f"{tag} {name_a}", project=args.project),
-            name_b: _recon(diff_b, model_b, hf, ratio, rc, eta, coords_b, args.batch,
-                           label=f"{tag} {name_b}", project=args.project),
-            "Bicubic": torch.cat([reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
-                                  for i in range(0, len(hf), args.batch)]),
-        }
+        preds = {disp: _recon(dif, mod, hf, ratio, rc, eta, coords, args.batch,
+                              label=f"{tag} {disp}", project=args.project)
+                 for disp, mod, dif, coords, _ in models}
+        preds["Bicubic"] = torch.cat(
+            [reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
+             for i in range(0, len(hf), args.batch)])
         row = {}
         for name, p in preds.items():
             pp = normalizer.decode(p)
@@ -140,12 +176,11 @@ def main():
         ens = {}
         for rc in cfg["sample"]["reconstructions"]:
             ratio = rc["ratio"]; tag = f"{ratio}x"
-            for name, (dif, mod, c) in {
-                    name_a: (diff_a, model_a, None if coords_a is None else coords_a[:n_e]),
-                    name_b: (diff_b, model_b, None if coords_b is None else coords_b[:n_e])}.items():
+            for disp, mod, dif, coords, _ in models:
+                c = None if coords is None else coords[:n_e]
                 members = [normalizer.decode(
                     _recon(dif, mod, hf_e, ratio, rc, eta, c, args.batch,
-                           label=f"{tag} {name} member {m + 1}/{args.ensemble}",
+                           label=f"{tag} {disp} member {m + 1}/{args.ensemble}",
                            project=args.project))
                     for m in range(args.ensemble)]
                 stack = torch.stack(members)
@@ -155,8 +190,8 @@ def main():
                     "crps": crps_ensemble(members, hf_e_phys),
                     "spread": float(stack.std(0).mean()),
                 }
-                ens.setdefault(tag, {})[name] = row
-                print(f"  {tag} {name:28s} | single L2 {row['single_l2']:.4f} | "
+                ens.setdefault(tag, {})[disp] = row
+                print(f"  {tag} {disp:28s} | single L2 {row['single_l2']:.4f} | "
                       f"ens-mean L2 {row['ensemble_mean_l2']:.4f} | "
                       f"CRPS {row['crps']:.4f} | spread {row['spread']:.4f}")
         table["ensemble"] = ens
@@ -164,17 +199,19 @@ def main():
     with open(results_dir / f"{stem}.json", "w") as f:
         json.dump(table, f, indent=2)
     _plot(spectra, results_dir / f"{stem}_spectrum.png")
-    print(f"\nSaved -> {results_dir / 'geo_ablation.json'}, geo_ablation_spectrum.png, "
-          f"and geo_ablation_qualitative_*.png")
+    print(f"\nSaved -> {results_dir / stem}.json, {stem}_spectrum.png, "
+          f"and {stem}_qualitative_*.png")
 
     wb_run, wandb = init_wandb(cfg, job_type="compare_geo",
                                extra_config={"n_test_patches": n,
-                                             "ckpt_a": args.geo_ckpt,
-                                             "ckpt_b": args.base_ckpt,
+                                             "ckpts": ckpt_names,
                                              "projection": args.project,
+                                             "shuffle_geo": args.shuffle_geo,
                                              "ensemble": args.ensemble},
-                               name=run_name(cfg, "ablation", name_a, "vs", name_b,
+                               name=run_name(cfg, "ladder" if len(models) > 2 else "ablation",
+                                             *(d for d, *_ in models),
                                              "proj" if args.project else "",
+                                             "shufgeo" if args.shuffle_geo else "",
                                              f"ens{args.ensemble}" if args.ensemble > 1 else ""))
     if wb_run is not None:
         # Scalars go to the run SUMMARY (columns in the runs table), not log():
@@ -198,6 +235,10 @@ def main():
             q = results_dir / f"{stem}_qualitative_{rc['ratio']}x.png"
             if q.exists():
                 log[f"ablation/qualitative_{rc['ratio']}x"] = wandb.Image(str(q))
+            # per-model Input|model|Reference figures
+            for pm in sorted(results_dir.glob(f"{stem}_qualitative_{rc['ratio']}x_*.png")):
+                key = pm.stem.replace(f"{stem}_", "")
+                log[f"ablation/{key}"] = wandb.Image(str(pm))
         wb_run.log(log)
         wb_run.finish()
         print("wandb: ablation run logged")
@@ -206,25 +247,38 @@ def main():
 def _qualitative(normalizer, hf, preds, ratio, rc, path, idx=0):
     """Side-by-side panels on a SHARED color scale (taken from the reference),
     so residual noise or bias shows as a visible difference instead of being
-    hidden by per-panel autoscaling."""
+    hidden by per-panel autoscaling. Also writes one small Input|model|Reference
+    figure PER model next to the combined panel."""
     from data.degrade import degrade
     lf = degrade(hf[idx:idx + 1].cpu(), ratio, rc.get("smooth_sigma", 0.0))
+    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
+    vmin, vmax = float(ref.min()), float(ref.max())
+
+    def _panel_fig(panels, out_path, suptitle):
+        fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
+        for ax, (title, t) in zip(np.atleast_1d(axes), panels):
+            ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
+                      vmin=vmin, vmax=vmax)
+            ax.set_title(title, fontsize=9)
+            ax.axis("off")
+        fig.suptitle(suptitle)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=130, bbox_inches="tight")
+        plt.close(fig)
+
     panels = [("Input (LF)", lf)]
     for name, p in preds.items():
         panels.append((name, p[idx:idx + 1]))
     panels.append(("Reference", hf[idx:idx + 1].cpu()))
-    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
-    vmin, vmax = float(ref.min()), float(ref.max())
-    fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
-    for ax, (title, t) in zip(axes, panels):
-        ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
-                  vmin=vmin, vmax=vmax)
-        ax.set_title(title, fontsize=9)
-        ax.axis("off")
-    fig.suptitle(f"{ratio}x reconstruction (shared color scale)")
-    fig.tight_layout()
-    fig.savefig(path, dpi=130, bbox_inches="tight")
-    plt.close(fig)
+    _panel_fig(panels, path, f"{ratio}x reconstruction (shared color scale)")
+
+    # One figure per model, each with the reference for direct comparison.
+    for name, p in preds.items():
+        safe = name.replace(" ", "_").replace("#", "")
+        _panel_fig([("Input (LF)", lf), (name, p[idx:idx + 1]),
+                    ("Reference", hf[idx:idx + 1].cpu())],
+                   path.with_name(f"{path.stem}_{safe}{path.suffix}"),
+                   f"{ratio}x — {name} vs reference (shared color scale)")
 
 
 def _plot(spectra, path):
