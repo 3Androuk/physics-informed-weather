@@ -55,14 +55,17 @@ _ENCODER_TAG = {"hash": "", "healpix": "_hpx", "xyz": "_xyz",
 def geo_suffix(cfg: dict) -> str:
     """Checkpoint-name suffix identifying the geo conditioning: '' when geo is
     disabled, else '_geo' + the encoder tag (e.g. '_geo', '_geo_hpx',
-    '_geo_static')."""
+    '_geo_static'), plus '_gated' when noise-dependent level gating is on."""
     g = cfg.get("geo", {})
     if not g.get("enabled", False):
         return ""
     encoder = g.get("encoder", "hash")
     if encoder not in _ENCODER_TAG:
         raise ValueError(f"unknown geo encoder: {encoder}")
-    return "_geo" + _ENCODER_TAG[encoder]
+    suffix = "_geo" + _ENCODER_TAG[encoder]
+    if g.get("level_gating", False):
+        suffix += "_gated"
+    return suffix
 
 
 def run_name(cfg: dict, *parts: str) -> str:

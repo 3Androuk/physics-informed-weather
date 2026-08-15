@@ -304,6 +304,66 @@ class HashStaticCombo(nn.Module):
         return torch.cat([self.hash(coords), static], dim=-1)
 
 
+class LevelGate(nn.Module):
+    """Noise-dependent per-level gating of a multiresolution geo embedding.
+
+    Diffusion-aware conditioning: g_l(u) = sigmoid((u - c_l) / w), where
+    u in [0, 1] is the SIGNAL fraction of the current sampling step (1 = clean
+    data) and c_l = l/(L-1) * c_max ramps from 0 (coarsest level, open at every
+    noise level) to c_max (finest level, open only late in denoising).
+
+    The point is a TRAINING-time regularizer against fine-scale location
+    memorization: with timesteps sampled uniformly, the fine tables currently
+    receive most of their gradient from noise-dominated steps where location
+    cannot matter — pure opportunity to fit noise/train-year anomalies. Gating
+    routes fine-level gradient to low-noise steps only. Guided inference is
+    barely affected: reconstruction chains start at u >= ~0.68, where all
+    gates are essentially open. Zero learned parameters.
+    """
+
+    def __init__(self, n_levels, n_features_per_level, gated_dim=None,
+                 c_max=0.6, width=0.1):
+        super().__init__()
+        self.F = n_features_per_level
+        self.width = float(width)
+        self.gated_dim = gated_dim if gated_dim is not None else n_levels * self.F
+        thresholds = (torch.linspace(0.0, float(c_max), n_levels)
+                      if n_levels > 1 else torch.zeros(1))
+        self.register_buffer("thresholds", thresholds)
+
+    def forward(self, emb, u):
+        """emb: (B, H, W, D) with the first gated_dim = L*F channels leveled
+        coarse->fine; u: (B,) signal fraction. Channels beyond gated_dim (e.g.
+        the static tail of hash_static) pass through ungated."""
+        g = torch.sigmoid((u.view(-1, 1) - self.thresholds) / self.width)  # (B, L)
+        g = g.repeat_interleave(self.F, dim=-1)                            # (B, L*F)
+        gated = emb[..., :self.gated_dim] * g.view(-1, 1, 1, self.gated_dim)
+        if emb.shape[-1] == self.gated_dim:
+            return gated
+        return torch.cat([gated, emb[..., self.gated_dim:]], dim=-1)
+
+
+def build_level_gate(cfg: dict):
+    """LevelGate from cfg['geo'] when level_gating is enabled (else None).
+
+    Only meaningful for leveled encoders (hash, healpix, hash_static — where
+    only the hash part is gated); other encoders reject the flag."""
+    g = cfg["geo"]
+    if not g.get("level_gating", False):
+        return None
+    encoder = g.get("encoder", "hash")
+    if encoder == "healpix":
+        n_levels = g.get("healpix_n_levels", g["n_levels"])
+    elif encoder in ("hash", "hash_static"):
+        n_levels = g["n_levels"]
+    else:
+        raise ValueError(f"level_gating requires a leveled encoder, got {encoder}")
+    return LevelGate(n_levels, g["n_features_per_level"],
+                     gated_dim=n_levels * g["n_features_per_level"],
+                     c_max=g.get("gating_c_max", 0.6),
+                     width=g.get("gating_width", 0.1))
+
+
 class GeoConditionedUNet(nn.Module):
     """Wrap a base UNet to consume a per-pixel geographic embedding.
 
@@ -312,14 +372,22 @@ class GeoConditionedUNet(nn.Module):
     predicts noise on the atmospheric field, never on the conditioning).
     """
 
-    def __init__(self, base_unet: nn.Module, geo_encoder: MultiResHashGrid):
+    def __init__(self, base_unet: nn.Module, geo_encoder: MultiResHashGrid,
+                 level_gate: LevelGate | None = None,
+                 ddpm_timesteps: int | None = None):
         super().__init__()
         self.unet = base_unet
         self.geo = geo_encoder
+        self.gate = level_gate
+        self.ddpm_timesteps = ddpm_timesteps
 
     def forward(self, x_t, t, coords):
-        """x_t: (B,1,H,W); t: (B,); coords: (B,H,W,d) in [0,1]."""
+        """x_t: (B,1,H,W); t: (B,) DDPM timesteps in [1, T] (or None for the
+        direct map, where gating is inert); coords: (B,H,W,d) in [0,1]."""
         emb = self.geo(coords)                       # (B, H, W, E)
+        if self.gate is not None and t is not None and self.ddpm_timesteps:
+            u = 1.0 - t.float() / self.ddpm_timesteps   # signal fraction
+            emb = self.gate(emb, u.clamp(0.0, 1.0))
         emb = emb.permute(0, 3, 1, 2).contiguous()   # (B, E, H, W)
         return self.unet(torch.cat([x_t, emb], dim=1), t)
 
