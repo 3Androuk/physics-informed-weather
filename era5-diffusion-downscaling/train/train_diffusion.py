@@ -41,7 +41,7 @@ def main():
                     help="Override config seed for replicate runs; the checkpoint "
                          "name gets an _s<seed> suffix so replicates don't "
                          "overwrite the primary run.")
-    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
     args = ap.parse_args()

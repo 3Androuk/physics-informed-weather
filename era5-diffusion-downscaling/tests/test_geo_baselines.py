@@ -72,12 +72,21 @@ class EncoderTests(unittest.TestCase):
 
     def test_build_geo_encoder_dispatch(self):
         expected_dims = {"hash": 8, "healpix": 6, "xyz": 3,
-                         "sinusoidal": 12, "static": 2}
+                         "sinusoidal": 12, "static": 2, "hash_static": 10}
         for encoder, dim in expected_dims.items():
             enc = build_geo_encoder(geo_cfg(encoder))
             self.assertEqual(enc.output_dim, dim, encoder)
         with self.assertRaises(ValueError):
             build_geo_encoder(geo_cfg("nope"))
+
+    def test_hash_static_combo_splits_payload(self):
+        # First d channels feed the hash grid; the trailing S static channels
+        # pass through untouched into the tail of the embedding.
+        enc = build_geo_encoder(geo_cfg("hash_static"))
+        payload = torch.rand(2, 8, 8, 5)   # d=3 coords | S=2 static
+        out = enc(payload)
+        self.assertEqual(out.shape, (2, 8, 8, 10))
+        self.assertTrue(torch.equal(out[..., -2:], payload[..., 3:]))
 
 
 class LadderTests(unittest.TestCase):
@@ -103,7 +112,8 @@ class SuffixTests(unittest.TestCase):
         self.assertEqual(geo_suffix({}), "")
         for encoder, tag in (("hash", "_geo"), ("healpix", "_geo_hpx"),
                              ("xyz", "_geo_xyz"), ("sinusoidal", "_geo_sin"),
-                             ("static", "_geo_static")):
+                             ("static", "_geo_static"),
+                             ("hash_static", "_geo_combo")):
             self.assertEqual(geo_suffix({"geo": {"enabled": True,
                                                  "encoder": encoder}}), tag)
         with self.assertRaises(ValueError):
@@ -135,7 +145,17 @@ class StaticDatasetTests(unittest.TestCase):
             # channels-last crop matches the (S, H, W) source at the origin
             np.testing.assert_allclose(payload.numpy(),
                                        static[:, 4:12, 8:16].transpose(1, 2, 0))
-            del ds  # release mmap before the tempdir is removed
+
+            combo = PatchDataset(tmp / "patches.npy", Normalizer(0.0, 1.0),
+                                 origins_path=tmp / "origins.npy",
+                                 coords_full_path=tmp / "coords_full.npz",
+                                 geo_encoder="hash_static")
+            _, cp = combo[1]
+            self.assertEqual(tuple(cp.shape), (8, 8, 5))  # 3 coords + 2 static
+            np.testing.assert_allclose(cp[..., 3:].numpy(),
+                                       static[:, 4:12, 8:16].transpose(1, 2, 0))
+            self.assertTrue((cp[..., :3] >= 0).all() and (cp[..., :3] <= 1).all())
+            del ds, combo  # release mmaps before the tempdir is removed
 
 
 class ConditionedModelTests(unittest.TestCase):
@@ -145,6 +165,8 @@ class ConditionedModelTests(unittest.TestCase):
     def _payload(self, encoder, batch=2, size=16):
         if encoder == "static":
             return torch.rand(batch, size, size, 2)
+        if encoder == "hash_static":
+            return torch.rand(batch, size, size, 5)  # 3 coords + 2 static
         if encoder == "healpix":
             # per-level indices must stay inside each level's 12*Nside^2 cells
             from models.geo_encoding import healpix_nside_ladder
@@ -158,7 +180,8 @@ class ConditionedModelTests(unittest.TestCase):
 
     def test_transport_model_with_each_encoder(self):
         torch.manual_seed(0)
-        for encoder in ("hash", "healpix", "xyz", "sinusoidal", "static"):
+        for encoder in ("hash", "healpix", "xyz", "sinusoidal", "static",
+                        "hash_static"):
             cfg = geo_cfg(encoder)
             model = build_transport_model(cfg, "flow")
             x = torch.randn(2, 1, 16, 16)
@@ -171,7 +194,7 @@ class ConditionedModelTests(unittest.TestCase):
         from models.geo_encoding import GeoConditionedUNet
         from models.unet import build_unet
         torch.manual_seed(0)
-        for encoder in ("xyz", "sinusoidal", "static"):
+        for encoder in ("xyz", "sinusoidal", "static", "hash_static"):
             cfg = geo_cfg(encoder)
             geo_enc = build_geo_encoder(cfg)
             base = build_unet(cfg, use_time=True,

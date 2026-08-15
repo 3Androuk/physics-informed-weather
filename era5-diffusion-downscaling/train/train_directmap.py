@@ -37,7 +37,7 @@ def main():
                     help="Geo-conditioned regression: concat the hash-grid location "
                          "embedding to the input (CorrDiff-style static "
                          "conditioning); checkpoint becomes directmap_geo.pt.")
-    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
     ap.add_argument("--random-ratio", action="store_true",

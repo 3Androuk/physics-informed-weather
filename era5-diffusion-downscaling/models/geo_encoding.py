@@ -282,6 +282,28 @@ class StaticFields(nn.Module):
         return payload
 
 
+class HashStaticCombo(nn.Module):
+    """Learned hash-grid embedding CONCATENATED with real static fields.
+
+    The discriminating arm of the geo ablation: static fields supply
+    physiography outright, so any gain of this arm over static-alone is
+    location signal the tables capture BEYOND physiography; parity means the
+    tables were physiography proxies. Payload (from PatchDataset,
+    encoder='hash_static'): (..., H, W, d + S) = [unit-sphere coords |
+    normalized static fields]."""
+
+    def __init__(self, hash_grid: "MultiResHashGrid", n_fields: int):
+        super().__init__()
+        self.hash = hash_grid
+        self.n_fields = n_fields
+        self.output_dim = hash_grid.output_dim + n_fields
+
+    def forward(self, payload):
+        coords = payload[..., : self.hash.d]
+        static = payload[..., self.hash.d:]
+        return torch.cat([self.hash(coords), static], dim=-1)
+
+
 class GeoConditionedUNet(nn.Module):
     """Wrap a base UNet to consume a per-pixel geographic embedding.
 
@@ -325,9 +347,9 @@ def build_geo_encoder(cfg: dict):
     if encoder == "static":
         return StaticFields(n_fields=len(g.get("static_fields",
                                                DEFAULT_STATIC_FIELDS)))
-    if encoder != "hash":
+    if encoder not in ("hash", "hash_static"):
         raise ValueError(f"unknown geo encoder: {encoder}")
-    return MultiResHashGrid(
+    grid = MultiResHashGrid(
         input_dim=g["input_dim"],
         n_levels=g["n_levels"],
         n_features_per_level=g["n_features_per_level"],
@@ -335,3 +357,7 @@ def build_geo_encoder(cfg: dict):
         base_resolution=g["base_resolution"],
         finest_resolution=g["finest_resolution"],
     )
+    if encoder == "hash_static":
+        return HashStaticCombo(grid, n_fields=len(g.get("static_fields",
+                                                        DEFAULT_STATIC_FIELDS)))
+    return grid
