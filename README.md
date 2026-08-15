@@ -27,7 +27,13 @@ into a comparison suite of generative downscaling methods:
 - **Geographic conditioning** — learned sphere-native location embeddings
   (Instant-NGP hash grid, HEALPix pyramid) vs zero-parameter baselines
   (raw coordinates, fixed sinusoidal basis, real orography/land-sea static
-  fields), with a permutation control
+  fields), with a permutation control and optional noise-dependent level
+  gating (`--gated`). Headline result so far: geographic conditioning buys a
+  real ~13 % L2 gain at 4×, but learned tables, real physiography, and a
+  scale-matched HEALPix ladder all plateau at the same level — the learned
+  embeddings converge to a physiography-equivalent signal, and the original
+  HEALPix gap was scale misallocation, not spherical geometry (details and
+  numbers in the subproject README)
 - **Full-field reconstruction** — patch-trained models applied to whole
   lat-band fields: direct inference, overlap-blend tiling with shared noise and
   exact data-consistency projection, and MultiDiffusion-style per-step fusion
