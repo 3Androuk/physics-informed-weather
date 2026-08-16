@@ -98,13 +98,34 @@ denormalization; spectrum = mean |log10| radial-spectrum error):
 | `sinusoidal` | 0.4112 | 0.0233 |
 | `hash` (learned) | 0.3526 | 0.0086 |
 | `static` (physiography) | 0.3478 | 0.0100 |
+| `hash_static` (combo) | 0.3410 | 0.0096 |
 
-- **The geographic gain is real (~13 % L2) but encoder-invariant at the top.**
-  `hash`, `static`, and the ring-matched `healpix` ladder (Nside 8–64, i.e.
-  scales matched to the hash band) all land within noise of each other, at 8×
-  as well as 4×. The learned tables converge to a *physiography-equivalent*
-  signal — they earn their keep only where a static descriptor of the surface
-  would too.
+Same three top arms at 8× (weaker guidance, larger errors overall):
+
+| arm (8×) | L2 | spectrum |
+|---|---|---|
+| bicubic | 0.7654 | 0.1017 |
+| `hash` | 0.6353 | 0.0257 |
+| `static` | 0.6322 | 0.0265 |
+| `hash_static` (combo) | 0.6217 | 0.0258 |
+
+Re-evaluating the same checkpoints moves L2 by ~±0.002–0.005 (fresh sampling
+noise; e.g. `static` 0.3478 vs 0.3458, `hash` 0.3526 vs 0.3530 across runs) —
+the run-to-run noise floor for reading the tables above.
+
+- **The geographic gain is real (~13 % L2) but nearly encoder-invariant at
+  the top.** `hash`, `static`, and the ring-matched `healpix` ladder
+  (Nside 8–64, i.e. scales matched to the hash band) all land within noise of
+  each other, at 8× as well as 4×. The learned tables converge to a
+  *physiography-equivalent* signal — they earn their keep only where a static
+  descriptor of the surface would too.
+- **The combo (tie-breaker) arm comes out best at both ratios**: −0.005 L2 vs
+  `static` at 4× and −0.011 at 8×, with a spectrum between `hash` and
+  `static`. Direction is consistent, but the 4× margin sits at the noise
+  floor, so the small-increment reading (learning adds a little *on top of*
+  physiography) needs seed replicates to be conclusive; a `--shuffle-geo`
+  control on the combo arm would also rule out the capacity confound (the
+  combo conditions on 19 channels vs static's 3).
 - **Raw coordinates are a null** (`xyz` ≈ no-geo): the UNet cannot exploit
   location identity without a multiscale representation.
 - **A fixed Fourier basis actively hurts the spectrum** (`sinusoidal`,
@@ -117,9 +138,9 @@ denormalization; spectrum = mean |log10| radial-spectrum error):
   more elaborate spherical parameterizations (icosphere / cubed-sphere hash)
   as a route to accuracy on this task.
 
-Pending before these become thesis-final: the `hash_static` combo arm (does
-learning add anything *on top of* physiography?), seed replicates for the
-~0.005-L2 gaps, and the `--gated` ablation.
+Pending before these become thesis-final: seed replicates (the combo-vs-static
+margin and every other ~0.005-L2 gap sit at the sampling-noise floor), the
+`--shuffle-geo` control on the combo arm, and the `--gated` ablation.
 
 ## Full-field reconstruction
 
