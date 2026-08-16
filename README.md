@@ -30,9 +30,12 @@ into a comparison suite of generative downscaling methods:
   fields), with a permutation control and optional noise-dependent level
   gating (`--gated`). Headline result so far: geographic conditioning buys a
   real ~13 % L2 gain at 4×, but learned tables, real physiography, and a
-  scale-matched HEALPix ladder all plateau at the same level — the learned
-  embeddings converge to a physiography-equivalent signal, and the original
-  HEALPix gap was scale misallocation, not spherical geometry (details and
+  scale-matched HEALPix ladder all plateau at essentially the same level — the
+  learned embeddings converge to a physiography-equivalent signal, and the
+  original HEALPix gap was scale misallocation, not spherical geometry. The
+  static+hash combo arm edges out both at 4× and 8× (margin at the
+  sampling-noise floor at 4×, ~2× it at 8×), hinting learning adds a small
+  increment on top of physiography — seed replicates pending (details and
   numbers in the subproject README)
 - **Full-field reconstruction** — patch-trained models applied to whole
   lat-band fields: direct inference, overlap-blend tiling with shared noise and
