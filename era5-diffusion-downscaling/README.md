@@ -309,6 +309,16 @@ rules). Only rank 0 validates, logs (stdout / TensorBoard / wandb), and writes
 checkpoints; the checkpoint format is unchanged, so runs move freely between
 single- and multi-GPU setups and `--resume` works across both.
 
+**Keep the training mode uniform within a comparison ladder.** Because
+`batch_size` is per process, DDP-4 runs at 4× the global batch of a
+single-process run — a different optimization trajectory, i.e. a systematic
+confound between arms that sub-percent margins (the ±0.3 % sampling-noise
+floor in the geo ablations) cannot absorb. Train every arm of a ladder the
+same way — all single-process or all DDP at the same world size — and never
+compare a DDP-trained arm against single-process baselines silently. To
+reproduce the single-process trajectory under DDP-4 exactly, divide
+`batch_size` by the world size (e.g. 16 → 4 per process).
+
 ### Experiment tracking (Weights & Biases)
 
 wandb is **opt-in** and independent of the always-on TensorBoard logs
