@@ -275,6 +275,40 @@ evaluation include `--steps`, `--solver {euler,heun}`,
 `--geo --encoder healpix` to either training command to enable geographic
 conditioning; HEALPix requires running `data.make_healpix_index` first.
 
+### Multi-node / multi-GPU training (optional)
+
+Any trainer can split the **same run** across several GPUs or nodes
+(data-parallel DDP). Nothing changes by default — the distributed path only
+activates when a trainer is launched under `torchrun`. For the standard
+4-node × 1-GPU setup, run this on every node (from this directory, with all
+nodes seeing the same `datasets/`):
+
+```bash
+# node 0 (the rendezvous host); nodes 1..3 run the same with NODE_RANK=1/2/3
+MASTER_ADDR=node0.example NODE_RANK=0 \
+  scripts/train_multinode.sh train.train_diffusion --config config/t2m.yaml
+```
+
+Single node with 4 GPUs instead:
+
+```bash
+NNODES=1 NPROC_PER_NODE=4 NODE_RANK=0 MASTER_ADDR=localhost \
+  scripts/train_multinode.sh train.train_diffusion --config config/t2m.yaml
+```
+
+Works with every trainer (`train.train_diffusion`, `train.train_directmap`,
+`train.train_residual`, `train.train_flow_matching`,
+`train.train_stochastic_interpolant`) and composes with the usual flags
+(`--geo`, `--encoder`, `--seed`, `--resume`, `--wandb`).
+
+Semantics (details in `train/distributed.py`): each process draws a disjoint
+shard of every epoch and gradients are averaged every step, so
+`train.batch_size` is **per process** — the effective global batch is
+`batch_size × world size` (scale the LR yourself if you want large-batch
+rules). Only rank 0 validates, logs (stdout / TensorBoard / wandb), and writes
+checkpoints; the checkpoint format is unchanged, so runs move freely between
+single- and multi-GPU setups and `--resume` works across both.
+
 ### Experiment tracking (Weights & Biases)
 
 wandb is **opt-in** and independent of the always-on TensorBoard logs

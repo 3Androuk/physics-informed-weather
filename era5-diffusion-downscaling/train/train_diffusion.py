@@ -5,6 +5,10 @@ gives the inference-time distribution robustness across downsampling ratios.
 
 Run:
     python -m train.train_diffusion --config config/default.yaml
+
+Optionally, the same run can be split across several GPUs/nodes (e.g. 4 nodes)
+by launching under torchrun — see train/distributed.py and
+scripts/train_multinode.sh. Single-process behavior is unchanged.
 """
 
 import argparse
@@ -21,10 +25,11 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
+from train.distributed import (cleanup, init_distributed,  # noqa: E402
+                               make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
 from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
-                   geo_suffix, get_device, init_wandb, load_config, run_name,
-                   set_seed)
+                   geo_suffix, init_wandb, load_config, run_name, set_seed)
 
 
 def main():
@@ -61,7 +66,8 @@ def main():
     if args.seed is not None:
         cfg["seed"] = args.seed
     set_seed(cfg["seed"])
-    device = get_device()
+    dist = init_distributed()  # no-op unless launched under torchrun
+    device = dist.device
 
     tc = cfg["train"]
     patch_dir = Path(cfg["paths"]["patch_dir"])
@@ -86,21 +92,22 @@ def main():
         )
     else:
         ds = PatchDataset(patch_dir / "train_patches.npy", normalizer)
-    loader = DataLoader(
-        ds, batch_size=tc["batch_size"], shuffle=True,
-        num_workers=tc["num_workers"], pin_memory=True, drop_last=True,
-        persistent_workers=tc["num_workers"] > 0,
-    )
+    loader = make_train_loader(ds, tc["batch_size"], tc["num_workers"], dist,
+                               seed=cfg["seed"])
     print(f"Train patches: {len(ds)} | batches/epoch: {len(loader)} | geo={geo_on}")
 
     # Reference patches (physical units) for the periodic sample-spectrum metric.
-    _spec_ref = normalizer.decode(torch.stack(
-        [ds[i][0] if geo_on else ds[i] for i in range(min(64, len(ds)))]))
+    _spec_ref = None
+    if dist.is_main:
+        _spec_ref = normalizer.decode(torch.stack(
+            [ds[i][0] if geo_on else ds[i] for i in range(min(64, len(ds)))]))
 
-    # Held-out patches for a fixed-RNG validation loss (comparable across epochs).
+    # Held-out patches for a fixed-RNG validation loss (comparable across
+    # epochs). Rank 0 only under DDP: weights are identical on every rank, so
+    # one process scoring the full val set reproduces single-process values.
     val_loader = None
     test_path = patch_dir / "test_patches.npy"
-    if test_path.exists():
+    if dist.is_main and test_path.exists():
         if geo_on:
             gcfg = cfg["geo"]
             val_ds = PatchDataset(
@@ -118,7 +125,7 @@ def main():
         val_loader = DataLoader(Subset(val_ds, range(n_val)),
                                 batch_size=tc["batch_size"], shuffle=False, num_workers=0)
         print(f"Val patches: {n_val}")
-    else:
+    elif dist.is_main:
         print("(no test_patches.npy — skipping val loss)")
 
     if geo_on:
@@ -160,17 +167,31 @@ def main():
     elif args.resume:
         print(f"(no checkpoint at {ckpt_path} — starting fresh)")
 
-    writer = None
-    try:
-        from torch.utils.tensorboard import SummaryWriter
-        writer = SummaryWriter(cfg["paths"]["log_dir"])
-    except Exception:
-        print("(tensorboard unavailable — skipping logging)")
+    # DDP wrap AFTER resume so state loads into the raw module; raw_model stays
+    # the handle for EMA/val/checkpointing (its state_dict keeps plain keys).
+    raw_model = model
+    model = wrap_model(model, dist, cfg)
+    if dist.enabled:
+        # Same weights everywhere (DDP broadcast), different noise/timestep
+        # draws per rank — otherwise all ranks would sample identical batch noise.
+        set_seed(cfg["seed"] + dist.rank)
 
-    wb_run, wandb = init_wandb(cfg, job_type="train_diffusion",
-                               extra_config={"unet_params": n_params, "n_train_patches": len(ds)},
-                               name=run_name(cfg, Path(ckpt_name).stem,
-                                             "resumed" if start_epoch > 1 else ""))
+    writer = None
+    if dist.is_main:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            writer = SummaryWriter(cfg["paths"]["log_dir"])
+        except Exception:
+            print("(tensorboard unavailable — skipping logging)")
+
+    wb_run, wandb = (None, None)
+    if dist.is_main:
+        wb_run, wandb = init_wandb(cfg, job_type="train_diffusion",
+                                   extra_config={"unet_params": n_params,
+                                                 "n_train_patches": len(ds),
+                                                 "world_size": dist.world_size},
+                                   name=run_name(cfg, Path(ckpt_name).stem,
+                                                 "resumed" if start_epoch > 1 else ""))
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
 
@@ -181,6 +202,7 @@ def main():
     bucket_sum, bucket_n = [0.0] * 4, [0] * 4  # loss by timestep quartile
     t_last_log = time.time()
     for epoch in range(start_epoch, tc["epochs"] + 1):
+        set_epoch(loader, epoch)  # reshuffle the per-rank shard (DDP only)
         model.train()
         epoch_loss, epoch_batches = 0.0, 0
         epoch_start = time.time()
@@ -204,7 +226,7 @@ def main():
                 tc["grad_clip"] if tc["grad_clip"] > 0 else float("inf"))
             scaler.step(opt)
             scaler.update()
-            ema.update(model)
+            ema.update(raw_model)
 
             running += loss.item()
             running_n += 1
@@ -223,7 +245,10 @@ def main():
                 metrics = {
                     "train/loss": running / running_n,
                     "train/grad_norm": grad_sum / running_n,
-                    "train/imgs_per_sec": running_n * x0.shape[0] / (now - t_last_log),
+                    # Global throughput: all ranks step in lockstep, so rank
+                    # 0's window x world_size counts every rank's images.
+                    "train/imgs_per_sec": (running_n * x0.shape[0] * dist.world_size
+                                           / (now - t_last_log)),
                     "epoch": epoch,
                 }
                 for k in range(4):  # q1 = lowest-noise quartile of t
@@ -252,7 +277,7 @@ def main():
         if device.type == "cuda":
             epoch_metrics["train/gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 2**30
         if val_loader is not None:
-            epoch_metrics["val/loss"] = _val_loss(diffusion, model, val_loader, device)
+            epoch_metrics["val/loss"] = _val_loss(diffusion, raw_model, val_loader, device)
             epoch_metrics["val/loss_ema"] = _val_loss(diffusion, ema.shadow, val_loader, device)
             print(f"epoch {epoch:03d} done | val loss {epoch_metrics['val/loss']:.5f} "
                   f"(ema {epoch_metrics['val/loss_ema']:.5f}) | "
@@ -264,7 +289,7 @@ def main():
             wb_run.log(epoch_metrics, step=step)
         t_last_log = time.time()  # exclude val/sampling time from throughput
 
-        if epoch % tc["sample_every_epochs"] == 0:
+        if dist.is_main and epoch % tc["sample_every_epochs"] == 0:
             sample_path = results_dir / f"uncond_epoch{epoch:03d}.png"
             sample_cond = None
             if geo_on:
@@ -291,15 +316,19 @@ def main():
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
             # Never clobber the last good checkpoint with diverged weights; a
             # NaN here is unrecoverable, so stop instead of training garbage.
-            if not (_weights_finite(model) and _weights_finite(ema.shadow)):
+            # (All ranks check — weights are identical, so all stop together.)
+            if not (_weights_finite(raw_model) and _weights_finite(ema.shadow)):
                 raise RuntimeError(
                     f"non-finite weights at epoch {epoch} — training has diverged. "
                     f"Checkpoint NOT overwritten; last good state kept at {ckpt_path}. "
                     "Fix the cause (e.g. disable amp), then rerun with --resume.")
-            _save_ckpt(ckpt_path, model, ema, opt, scaler, cfg, normalizer, epoch, step)
+            if dist.is_main:
+                _save_ckpt(ckpt_path, raw_model, ema, opt, scaler, cfg,
+                           normalizer, epoch, step)
 
     if wb_run is not None:
         wb_run.finish()
+    cleanup(dist)
     print(f"Done. Checkpoint -> {ckpt_path}")
 
 

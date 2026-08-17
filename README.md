@@ -40,6 +40,9 @@ into a comparison suite of generative downscaling methods:
 - **Full-field reconstruction** — patch-trained models applied to whole
   lat-band fields: direct inference, overlap-blend tiling with shared noise and
   exact data-consistency projection, and MultiDiffusion-style per-step fusion
+- **Optional multi-node training** — every trainer can split the same run
+  across several GPUs/nodes (e.g. 4 nodes) via torchrun/DDP
+  (`scripts/train_multinode.sh`); single-process behavior is unchanged
 
 → See [`era5-diffusion-downscaling/README.md`](era5-diffusion-downscaling/README.md)
 for methods, commands, and references.
