@@ -51,6 +51,36 @@ def radial_power_spectrum(fields):
     return np.arange(kmax + 1), E.mean(axis=0)
 
 
+def radial_coherence(pred, truth):
+    """Radially-averaged spectral coherence between prediction and reference.
+
+    coh(k) = |sum P_xy| / sqrt(sum P_xx * sum P_yy), with the sums over samples
+    and the annulus at wavenumber k. 1 = the predicted structure at that scale
+    is phase-locked to the reference (informative), 0 = uncorrelated (invented
+    texture). Distinguishes scales the model RECONSTRUCTS from scales it merely
+    HALLUCINATES with the right power — the radial power spectrum alone cannot
+    tell those apart.
+
+    Returns (k, coh) like radial_power_spectrum.
+    """
+    p, t = _to_numpy(pred), _to_numpy(truth)
+    fp = np.fft.fftshift(np.fft.fft2(p, axes=(-2, -1)), axes=(-2, -1))
+    ft = np.fft.fftshift(np.fft.fft2(t, axes=(-2, -1)), axes=(-2, -1))
+    _, h, w = p.shape
+    cy, cx = h // 2, w // 2
+    yy, xx = np.indices((h, w))
+    r = np.round(np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)).astype(int)
+    kmax = min(cy, cx)
+    coh = np.empty(kmax + 1)
+    for k in range(kmax + 1):
+        m = r == k
+        pxy = (fp[:, m] * np.conj(ft[:, m])).sum()
+        pxx = (np.abs(fp[:, m]) ** 2).sum()
+        pyy = (np.abs(ft[:, m]) ** 2).sum()
+        coh[k] = np.abs(pxy) / max(np.sqrt(pxx * pyy), 1e-30)
+    return np.arange(kmax + 1), coh
+
+
 def spectrum_log_l1(pred, truth) -> float:
     """Mean absolute log10-spectrum error over wavenumbers k >= 1 (skip DC)."""
     _, ep = radial_power_spectrum(pred)
