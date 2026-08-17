@@ -138,9 +138,33 @@ the run-to-run noise floor for reading the tables above.
   more elaborate spherical parameterizations (icosphere / cubed-sphere hash)
   as a route to accuracy on this task.
 
-Pending before these become thesis-final: seed replicates (the combo-vs-static
-margin and every other ~0.005-L2 gap sit at the sampling-noise floor), the
-`--shuffle-geo` control on the combo arm, and the `--gated` ablation.
+4-member ensembles (64 patches, projected, `--ensemble 4`):
+
+| arm | single L2 | ens-mean L2 | CRPS | spread |
+|---|---|---|---|---|
+| 4× `hash` | 0.3715 | 0.2847 | 0.1150 | 0.2001 |
+| 4× `hash_static` | 0.3590 | 0.2752 | 0.1109 | 0.1933 |
+| 8× `hash` | 0.6518 | 0.5102 | 0.2267 | 0.3708 |
+| 8× `hash_static` | 0.6419 | 0.5029 | 0.2237 | 0.3658 |
+
+- The combo leads every probabilistic metric while being *sharper* (lower
+  spread at lower CRPS: more information, narrower posterior). Its one loss
+  is the 4× spectrum (0.0093 vs hash 0.0083) — the static channels trade a
+  little spectral fidelity for pointwise/probabilistic accuracy in the
+  mild-degradation regime. Note hash ⊂ combo, so this ordering is the
+  expected direction; the *discriminating* probabilistic pair is combo vs
+  `static`, whose ensemble has not been run yet.
+- Both arms are ~20 % underdispersive (a reliable 4-member ensemble would
+  have spread ≈ ens-mean L2 / sqrt(1 + 1/M) ≈ 0.246 at 4×; measured 0.193) —
+  expected with `ddim_eta: 0`, where members differ only through the
+  noise-mixing initialization. The licensed upgrade is sampling-time
+  stochasticity: `--eta` on `eval.compare_geo` overrides the config value
+  without retraining anything.
+
+Pending before these become thesis-final: the `static` ensemble (the
+probabilistic tie-breaker), seed replicates (the combo-vs-static single-draw
+margin sits near the sampling-noise floor), the `--shuffle-geo` control on
+the combo arm, an `--eta` calibration sweep, and the `--gated` ablation.
 
 ## Multivariable (20-channel) downscaling
 

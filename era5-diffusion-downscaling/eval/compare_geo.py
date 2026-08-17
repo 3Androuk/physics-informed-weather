@@ -96,12 +96,17 @@ def main():
                          "CRPS, and spread on a subset of patches).")
     ap.add_argument("--ensemble-patches", type=int, default=64,
                     help="How many test patches the ensemble metrics use.")
+    ap.add_argument("--eta", type=float, default=None,
+                    help="Override sample.ddim_eta (DDIM stochasticity) for "
+                         "this eval only. >0 diversifies ensemble members "
+                         "beyond the noise-mixing initialization — the fix for "
+                         "underdispersive ensembles; no retraining involved.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
         cfg.setdefault("wandb", {})["enabled"] = True
     device = get_device()
-    eta = cfg["sample"]["ddim_eta"]
+    eta = cfg["sample"]["ddim_eta"] if args.eta is None else args.eta
 
     patch_dir = Path(cfg["paths"]["patch_dir"])
     ckpt_dir = Path(cfg["paths"]["ckpt_dir"])
@@ -144,6 +149,8 @@ def main():
         else f"{len(models)}way"
     stem = (f"compare_{tag_names}{'_proj' if args.project else ''}"
             f"{'_shufgeo' if args.shuffle_geo else ''}")
+    if args.eta is not None:
+        stem += f"_eta{args.eta:g}"
 
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
     hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
@@ -214,7 +221,8 @@ def main():
                                              *(d for d, *_ in models),
                                              "proj" if args.project else "",
                                              "shufgeo" if args.shuffle_geo else "",
-                                             f"ens{args.ensemble}" if args.ensemble > 1 else ""))
+                                             f"ens{args.ensemble}" if args.ensemble > 1 else "",
+                                             f"eta{args.eta:g}" if args.eta is not None else ""))
     if wb_run is not None:
         # Scalars go to the run SUMMARY (columns in the runs table), not log():
         # a one-shot eval otherwise creates one single-point chart per metric.
