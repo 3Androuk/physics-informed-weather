@@ -81,6 +81,12 @@ geo:
   finest_resolution: 512
   altitude: null                   # scalar in [0,1] if input_dim==4, else null
 
+# Optional multi-node / multi-GPU data parallelism. Nothing here activates
+# unless a trainer is launched under torchrun (scripts/train_multinode.sh);
+# train.batch_size stays PER PROCESS, so global batch = batch_size x processes.
+distributed:
+  find_unused_parameters: false  # only flip if DDP errors about unused params
+
 train:
   batch_size: 16            # RTX 4070 8GB: ~6.5GB at 128px. Drop to 8 if OOM; 32 needs ~12GB.
   epochs: 200

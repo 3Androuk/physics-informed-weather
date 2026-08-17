@@ -8,6 +8,10 @@ held-out ratio (e.g. 6) for the generalization claim.
 
 Run:
     python -m train.train_residual --config config/t2m.yaml --wandb [--geo] [--seed N]
+
+Optionally, the same run can be split across several GPUs/nodes (e.g. 4 nodes)
+by launching under torchrun — see train/distributed.py and
+scripts/train_multinode.sh. Single-process behavior is unchanged.
 """
 
 import argparse
@@ -26,8 +30,10 @@ from data.degrade import coarsen, degrade as degrade_nearest  # noqa: E402
 from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.residual import build_residual_model  # noqa: E402
+from train.distributed import (cleanup, init_distributed,  # noqa: E402
+                               make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
-from utils import (display_channel, ensure_dir, geo_suffix, get_device,  # noqa: E402
+from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
                    init_wandb, load_config, run_name, set_seed)
 
 
@@ -73,7 +79,8 @@ def main():
     if args.seed is not None:
         cfg["seed"] = args.seed
     set_seed(cfg["seed"])
-    device = get_device()
+    dist = init_distributed()  # no-op unless launched under torchrun
+    device = dist.device
 
     tc = cfg["train"]
     rcfg = cfg.get("residual", {})
@@ -125,11 +132,8 @@ def main():
                    healpix_index_path=((patch_dir / gcfg["healpix_index"])
                                        if gcfg.get("healpix_index") else None))
     ds = PatchDataset(patch_dir / "train_patches.npy", normalizer, **gkw)
-    loader = DataLoader(
-        ds, batch_size=tc["batch_size"], shuffle=True,
-        num_workers=tc["num_workers"], pin_memory=True, drop_last=True,
-        persistent_workers=tc["num_workers"] > 0,
-    )
+    loader = make_train_loader(ds, tc["batch_size"], tc["num_workers"], dist,
+                               seed=cfg["seed"])
     print(f"Residual diffusion | ratios {ratios} | patches {len(ds)} | geo={geo_on}")
 
     # ── Residual normalization: one scalar std over ratios (estimated once
@@ -151,9 +155,11 @@ def main():
     print(f"Residual std (normalized units): {res_std:.4f}")
 
     # ── Val: fixed-RNG residual noise-prediction loss at the middle ratio.
+    # Rank 0 only under DDP: weights are identical on every rank, so one
+    # process scoring the full val set reproduces single-process values.
     val_loader, val_ratio = None, ratios[len(ratios) // 2]
     test_path = patch_dir / "test_patches.npy"
-    if test_path.exists():
+    if dist.is_main and test_path.exists():
         vkw = dict(gkw)
         if need_coords:
             vkw["origins_path"] = patch_dir / "test_origins.npy"
@@ -188,20 +194,33 @@ def main():
     elif args.resume:
         print(f"(no checkpoint at {ckpt_path} — starting fresh)")
 
-    wb_run, wandb = init_wandb(cfg, job_type="train_residual",
-                               extra_config={"unet_params": n_params,
-                                             "n_train_patches": len(ds),
-                                             "train_ratios": ratios,
-                                             "res_std": res_std,
-                                             "mean_ckpt": args.mean_ckpt},
-                               name=run_name(cfg, Path(ckpt_name).stem,
-                                             "resumed" if start_epoch > 1 else ""))
+    # DDP wrap AFTER resume so state loads into the raw module; raw_model stays
+    # the handle for EMA/val/checkpointing (its state_dict keeps plain keys).
+    raw_model = model
+    model = wrap_model(model, dist, cfg)
+    if dist.enabled:
+        # Same weights everywhere (DDP broadcast); per-rank seed decorrelates
+        # the noise/timestep draws and per-batch ratio choices.
+        set_seed(cfg["seed"] + dist.rank)
+
+    wb_run, wandb = (None, None)
+    if dist.is_main:
+        wb_run, wandb = init_wandb(cfg, job_type="train_residual",
+                                   extra_config={"unet_params": n_params,
+                                                 "n_train_patches": len(ds),
+                                                 "train_ratios": ratios,
+                                                 "res_std": res_std,
+                                                 "mean_ckpt": args.mean_ckpt,
+                                                 "world_size": dist.world_size},
+                                   name=run_name(cfg, Path(ckpt_name).stem,
+                                                 "resumed" if start_epoch > 1 else ""))
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
 
     running, running_n, grad_sum = 0.0, 0, 0.0
     t_last_log = time.time()
     for epoch in range(start_epoch, tc["epochs"] + 1):
+        set_epoch(loader, epoch)  # reshuffle the per-rank shard (DDP only)
         model.train()
         epoch_loss, epoch_batches = 0.0, 0
         epoch_start = time.time()
@@ -227,7 +246,7 @@ def main():
                 tc["grad_clip"] if tc["grad_clip"] > 0 else float("inf"))
             scaler.step(opt)
             scaler.update()
-            ema.update(model)
+            ema.update(raw_model)
 
             running += loss.item()
             running_n += 1
@@ -240,7 +259,10 @@ def main():
                 metrics = {
                     "train/loss": running / running_n,
                     "train/grad_norm": grad_sum / running_n,
-                    "train/imgs_per_sec": running_n * y.shape[0] / (now - t_last_log),
+                    # Global throughput: ranks step in lockstep, so rank 0's
+                    # window x world_size counts every rank's images.
+                    "train/imgs_per_sec": (running_n * y.shape[0] * dist.world_size
+                                           / (now - t_last_log)),
                     "epoch": epoch,
                 }
                 print(f"epoch {epoch:03d} step {step:07d} | "
@@ -281,22 +303,25 @@ def main():
                 wb_run.log(log, step=step)
 
         if epoch % tc["ckpt_every_epochs"] == 0 or epoch == tc["epochs"]:
-            if not (_weights_finite(model) and _weights_finite(ema.shadow)):
+            # All ranks check — weights are identical, so all stop together.
+            if not (_weights_finite(raw_model) and _weights_finite(ema.shadow)):
                 raise RuntimeError(
                     f"non-finite weights at epoch {epoch} — training has diverged. "
                     f"Checkpoint NOT overwritten; last good state kept at {ckpt_path}.")
-            tmp = ckpt_path.with_suffix(".pt.tmp")
-            torch.save({
-                "model": model.state_dict(), "ema": ema.state_dict(),
-                "opt": opt.state_dict(), "scaler": scaler.state_dict(),
-                "config": cfg, "res_std": res_std, "mean_ckpt": args.mean_ckpt,
-                "norm_mean": normalizer.mean, "norm_std": normalizer.std,
-                "epoch": epoch, "step": step,
-            }, tmp)
-            tmp.replace(ckpt_path)
+            if dist.is_main:
+                tmp = ckpt_path.with_suffix(".pt.tmp")
+                torch.save({
+                    "model": raw_model.state_dict(), "ema": ema.state_dict(),
+                    "opt": opt.state_dict(), "scaler": scaler.state_dict(),
+                    "config": cfg, "res_std": res_std, "mean_ckpt": args.mean_ckpt,
+                    "norm_mean": normalizer.mean, "norm_std": normalizer.std,
+                    "epoch": epoch, "step": step,
+                }, tmp)
+                tmp.replace(ckpt_path)
 
     if wb_run is not None:
         wb_run.finish()
+    cleanup(dist)
     print(f"Done. Checkpoint -> {ckpt_path}")
 
 

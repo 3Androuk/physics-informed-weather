@@ -7,6 +7,10 @@ it on multiple ratios.
 
 Run:
     python -m train.train_directmap --config config/default.yaml
+
+Optionally, the same run can be split across several GPUs/nodes (e.g. 4 nodes)
+by launching under torchrun — see train/distributed.py and
+scripts/train_multinode.sh. Single-process behavior is unchanged.
 """
 
 import argparse
@@ -16,13 +20,14 @@ import time
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
-from utils import (display_channel, ensure_dir, geo_suffix, get_device,  # noqa: E402
+from train.distributed import (cleanup, init_distributed,  # noqa: E402
+                               make_train_loader, set_epoch, wrap_model)
+from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
                    init_wandb, load_config, run_name, set_seed)
 
 
@@ -55,7 +60,8 @@ def main():
     if args.encoder is not None:
         cfg.setdefault("geo", {})["encoder"] = args.encoder
     set_seed(cfg["seed"])
-    device = get_device()
+    dist = init_distributed()  # no-op unless launched under torchrun
+    device = dist.device
 
     dc = cfg["directmap"]
     ratio = dc["train_ratio"]
@@ -76,11 +82,8 @@ def main():
                    healpix_index_path=((patch_dir / gcfg["healpix_index"])
                                        if gcfg.get("healpix_index") else None))
     ds = PatchDataset(patch_dir / "train_patches.npy", normalizer, **gkw)
-    loader = DataLoader(
-        ds, batch_size=dc["batch_size"], shuffle=True,
-        num_workers=cfg["train"]["num_workers"], pin_memory=True, drop_last=True,
-        persistent_workers=cfg["train"]["num_workers"] > 0,
-    )
+    loader = make_train_loader(ds, dc["batch_size"], cfg["train"]["num_workers"],
+                               dist, seed=cfg["seed"])
     mode = f"ratios {train_ratios} (mean mode)" if train_ratios else f"train ratio {ratio}x"
     print(f"{'Regression mean' if train_ratios else 'Direct-map baseline'} | {mode} "
           f"| patches {len(ds)} | geo={geo_on}")
@@ -88,9 +91,11 @@ def main():
     # Held-out patches for per-epoch val MSE at the training ratio AND at 8x:
     # the in-distribution/out-of-distribution gap is the brittleness story as
     # a live training curve.
+    # Rank 0 only under DDP: weights are identical on every rank, so one
+    # process scoring the full val set reproduces single-process values.
     val_x, val_coords = None, None
     test_path = patch_dir / "test_patches.npy"
-    if test_path.exists():
+    if dist.is_main and test_path.exists():
         vkw = dict(gkw)
         if geo_on:
             vkw["origins_path"] = patch_dir / "test_origins.npy"
@@ -139,11 +144,26 @@ def main():
     elif args.resume:
         print(f"(no checkpoint at {ckpt_path} — starting fresh)")
 
-    wb_run, _ = init_wandb(cfg, job_type="train_directmap",
-                           extra_config={"train_ratio": train_ratios if train_ratios else ratio,
-                                         "n_train_patches": len(ds)},
-                           name=run_name(cfg, ckpt_path.stem,
-                                         "resumed" if start_epoch > 1 else ""))
+    # DDP wrap AFTER resume so state loads into the raw module. fwd late-binds
+    # `model`, so training goes through the wrapper (gradient averaging), while
+    # fwd_eval keeps validation/figures on the raw module (rank 0 only — a DDP
+    # forward there would deadlock waiting for the other ranks).
+    raw_model = model
+    model = wrap_model(model, dist, cfg)
+    if dist.enabled:
+        set_seed(cfg["seed"] + dist.rank)  # decorrelate per-batch ratio draws
+
+    def fwd_eval(x, c):
+        return raw_model(x, None, c) if geo_on else raw_model(x)
+
+    wb_run, _ = (None, None)
+    if dist.is_main:
+        wb_run, _ = init_wandb(cfg, job_type="train_directmap",
+                               extra_config={"train_ratio": train_ratios if train_ratios else ratio,
+                                             "n_train_patches": len(ds),
+                                             "world_size": dist.world_size},
+                               name=run_name(cfg, ckpt_path.stem,
+                                             "resumed" if start_epoch > 1 else ""))
     if wb_run is not None:
         print(f"wandb: logging to {wb_run.url}")
     # Loss accumulator persists across epoch boundaries: batches/epoch is rarely
@@ -152,6 +172,7 @@ def main():
     running, running_n, grad_sum = 0.0, 0, 0.0
     t_last_log = time.time()
     for epoch in range(start_epoch, dc["epochs"] + 1):
+        set_epoch(loader, epoch)  # reshuffle the per-rank shard (DDP only)
         model.train()
         epoch_start = time.time()
         if device.type == "cuda":
@@ -186,7 +207,10 @@ def main():
                 metrics = {
                     "train/mse": running / running_n,
                     "train/grad_norm": grad_sum / running_n,
-                    "train/imgs_per_sec": running_n * y.shape[0] / (now - t_last_log),
+                    # Global throughput: ranks step in lockstep, so rank 0's
+                    # window x world_size counts every rank's images.
+                    "train/imgs_per_sec": (running_n * y.shape[0] * dist.world_size
+                                           / (now - t_last_log)),
                     "epoch": epoch,
                 }
                 print(f"epoch {epoch:03d} step {step:07d} | "
@@ -214,7 +238,7 @@ def main():
                         y = val_x[i:i + dc["batch_size"]].to(device, non_blocking=True)
                         c = (val_coords[i:i + dc["batch_size"]].to(device, non_blocking=True)
                              if val_coords is not None else None)
-                        total += loss_fn(fwd(degrade(y, r), c), y).item() * y.shape[0]
+                        total += loss_fn(fwd_eval(degrade(y, r), c), y).item() * y.shape[0]
                         n += y.shape[0]
                     metrics[key] = total / max(n, 1)
             print(f"epoch {epoch:03d} done | val {ratio}x {metrics[f'val/mse_{ratio}x']:.5f} "
@@ -228,26 +252,28 @@ def main():
         if (val_x is not None and wb_run is not None
                 and epoch % cfg["train"].get("sample_every_epochs", 10) == 0):
             fig_path = ensure_dir(cfg["paths"]["results_dir"]) / f"directmap_epoch{epoch:03d}.png"
-            _save_recons(fwd, val_x[:2],
+            _save_recons(fwd_eval, val_x[:2],
                          None if val_coords is None else val_coords[:2],
-                         normalizer, device, ratio, fig_path, model,
+                         normalizer, device, ratio, fig_path, raw_model,
                          disp=display_channel(cfg))
             import wandb as _wandb
             wb_run.log({"recons": _wandb.Image(str(fig_path))}, step=step)
 
         # ── Atomic per-epoch checkpoint (a crash loses at most one epoch) ─
-        tmp = ckpt_path.with_suffix(".pt.tmp")
-        torch.save({
-            "model": model.state_dict(), "opt": opt.state_dict(),
-            "scaler": scaler.state_dict(), "config": cfg,
-            "train_ratio": train_ratios if train_ratios else ratio,
-            "norm_mean": normalizer.mean, "norm_std": normalizer.std,
-            "epoch": epoch, "step": step,
-        }, tmp)
-        tmp.replace(ckpt_path)
+        if dist.is_main:
+            tmp = ckpt_path.with_suffix(".pt.tmp")
+            torch.save({
+                "model": raw_model.state_dict(), "opt": opt.state_dict(),
+                "scaler": scaler.state_dict(), "config": cfg,
+                "train_ratio": train_ratios if train_ratios else ratio,
+                "norm_mean": normalizer.mean, "norm_std": normalizer.std,
+                "epoch": epoch, "step": step,
+            }, tmp)
+            tmp.replace(ckpt_path)
 
     if wb_run is not None:
         wb_run.finish()
+    cleanup(dist)
     print(f"Done. Checkpoint -> {ckpt_path}")
 
 
