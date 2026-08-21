@@ -75,7 +75,9 @@ transport:
 unet:
   in_channels: 20                # one channel per data.variables entry
   out_channels: 20
-  base_channels: 64
+  base_channels: 128             # widened for the 20-channel joint task (~4x the
+                                 # single-variable UNet's params; every level stays
+                                 # divisible by groupnorm_groups=32)
   channel_mults: [1, 2, 4, 8]
   num_res_blocks: 2
   time_emb_dim: 256
@@ -116,8 +118,9 @@ residual:
   n_steps: 100
 
 train:
-  batch_size: 8                  # 20 channels cost more activation memory than
-                                 # 1; start here and raise if the GPU has room
+  batch_size: 32                 # activation VRAM ~ batch x base_channels; if this
+                                 # OOMs on 24GB, set amp: true first (halves
+                                 # activations), only then drop the batch
   epochs: 200
   lr: 2.0e-4
   weight_decay: 0.0
@@ -132,7 +135,7 @@ train:
 
 directmap:
   train_ratio: 4
-  batch_size: 8
+  batch_size: 32
   epochs: 200
   lr: 2.0e-4
   grad_clip: 1.0
