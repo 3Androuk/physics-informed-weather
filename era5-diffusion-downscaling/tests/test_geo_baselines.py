@@ -119,6 +119,28 @@ class SuffixTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             geo_suffix({"geo": {"enabled": True, "encoder": "nope"}})
 
+    def test_checkpointed_embed_is_exact(self):
+        # Recompute-in-backward must be bitwise identical in output and
+        # numerically identical in the table gradients.
+        from models.geo_encoding import checkpointed_embed
+        torch.manual_seed(0)
+        enc = build_geo_encoder(geo_cfg("hash"))
+        coords = torch.rand(2, 8, 8, 3)
+        plain = enc(coords)
+        plain.square().sum().backward()
+        g_plain = [p.grad.clone() for p in enc.parameters()]
+        enc.zero_grad()
+        ck = checkpointed_embed(enc, coords)
+        self.assertTrue(torch.equal(ck, plain))
+        ck.square().sum().backward()
+        for gp, p in zip(g_plain, enc.parameters()):
+            self.assertTrue(torch.allclose(gp, p.grad))
+        # parameter-free encoders bypass the checkpoint machinery
+        static = build_geo_encoder(geo_cfg("static"))
+        payload = torch.rand(2, 8, 8, 2)
+        self.assertTrue(torch.equal(checkpointed_embed(static, payload),
+                                    static(payload)))
+
     def test_geo_suffix_gated(self):
         self.assertEqual(geo_suffix({"geo": {"enabled": True, "encoder": "hash",
                                              "level_gating": True}}),

@@ -38,7 +38,8 @@ class ResidualConditionalUNet(nn.Module):
         mean_field, coords = cond
         chans = [x_t, mean_field]
         if self.geo is not None:
-            emb = self.geo(coords)
+            from models.geo_encoding import checkpointed_embed
+            emb = checkpointed_embed(self.geo, coords)
             if self.gate is not None and t is not None and self.ddpm_timesteps:
                 u = 1.0 - t.float() / self.ddpm_timesteps
                 emb = self.gate(emb, u.clamp(0.0, 1.0))
