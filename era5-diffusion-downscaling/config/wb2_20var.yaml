@@ -118,9 +118,9 @@ residual:
   n_steps: 100
 
 train:
-  batch_size: 32                 # activation VRAM ~ batch x base_channels; if this
-                                 # OOMs on 24GB, drop the batch (20 -> 16) — this
-                                 # project trains fp32, amp stays off
+  batch_size: 24                 # fits width 128 in 24GB at fp32 (batch 32 does
+                                 # not); the ladder constant for ALL 20-var arms —
+                                 # amp stays off in this project
   epochs: 200
   lr: 2.0e-4
   weight_decay: 0.0
@@ -135,7 +135,7 @@ train:
 
 directmap:
   train_ratio: 4
-  batch_size: 32
+  batch_size: 24
   epochs: 200
   lr: 2.0e-4
   grad_clip: 1.0
