@@ -123,7 +123,9 @@ train:
                                  # (24.1GB), leaving no room for the geo arms —
                                  # amp stays off in this project
   epochs: 200
-  lr: 2.0e-4
+  lr: 1.0e-4                     # 2e-4 (the width-64 value) collapses the width-128
+                                 # model to the trivial loss=1 solution by epoch ~2;
+                                 # halved with the standard width scaling
   weight_decay: 0.0
   grad_clip: 1.0
   amp: false
@@ -138,7 +140,9 @@ directmap:
   train_ratio: 4
   batch_size: 20
   epochs: 200
-  lr: 2.0e-4
+  lr: 1.0e-4                     # 2e-4 (the width-64 value) collapses the width-128
+                                 # model to the trivial loss=1 solution by epoch ~2;
+                                 # halved with the standard width scaling
   grad_clip: 1.0
   amp: false
 
