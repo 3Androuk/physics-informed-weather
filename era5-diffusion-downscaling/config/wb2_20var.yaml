@@ -119,8 +119,8 @@ residual:
 
 train:
   batch_size: 32                 # activation VRAM ~ batch x base_channels; if this
-                                 # OOMs on 24GB, set amp: true first (halves
-                                 # activations), only then drop the batch
+                                 # OOMs on 24GB, drop the batch (20 -> 16) — this
+                                 # project trains fp32, amp stays off
   epochs: 200
   lr: 2.0e-4
   weight_decay: 0.0
