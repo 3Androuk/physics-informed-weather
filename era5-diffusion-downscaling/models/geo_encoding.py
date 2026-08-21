@@ -364,6 +364,21 @@ def build_level_gate(cfg: dict):
                      width=g.get("gating_width", 0.1))
 
 
+def checkpointed_embed(geo: nn.Module, coords):
+    """geo(coords), recomputing the encoder in backward instead of storing its
+    intermediates.
+
+    The pure-PyTorch hash/HEALPix lookup builds a chain of per-corner weight
+    and gather tensors (8 corners x L levels) that autograd would keep for
+    backward — ~2 GB at batch 24 on 128px patches. The gathers are
+    computationally trivial, so recomputing them costs milliseconds and the
+    math (and gradients) are identical. Parameter-free encoders (xyz,
+    sinusoidal, static) skip the machinery; so does any no-grad context."""
+    if torch.is_grad_enabled() and any(p.requires_grad for p in geo.parameters()):
+        return torch.utils.checkpoint.checkpoint(geo, coords, use_reentrant=False)
+    return geo(coords)
+
+
 class GeoConditionedUNet(nn.Module):
     """Wrap a base UNet to consume a per-pixel geographic embedding.
 
@@ -384,7 +399,7 @@ class GeoConditionedUNet(nn.Module):
     def forward(self, x_t, t, coords):
         """x_t: (B,1,H,W); t: (B,) DDPM timesteps in [1, T] (or None for the
         direct map, where gating is inert); coords: (B,H,W,d) in [0,1]."""
-        emb = self.geo(coords)                       # (B, H, W, E)
+        emb = checkpointed_embed(self.geo, coords)   # (B, H, W, E)
         if self.gate is not None and t is not None and self.ddpm_timesteps:
             u = 1.0 - t.float() / self.ddpm_timesteps   # signal fraction
             emb = self.gate(emb, u.clamp(0.0, 1.0))

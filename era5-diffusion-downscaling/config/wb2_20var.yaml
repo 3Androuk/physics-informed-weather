@@ -118,8 +118,9 @@ residual:
   n_steps: 100
 
 train:
-  batch_size: 24                 # fits width 128 in 24GB at fp32 (batch 32 does
-                                 # not); the ladder constant for ALL 20-var arms —
+  batch_size: 20                 # the ladder constant for ALL 20-var arms: batch
+                                 # 24 filled the 24GB card with the baseline alone
+                                 # (24.1GB), leaving no room for the geo arms —
                                  # amp stays off in this project
   epochs: 200
   lr: 2.0e-4
@@ -135,7 +136,7 @@ train:
 
 directmap:
   train_ratio: 4
-  batch_size: 24
+  batch_size: 20
   epochs: 200
   lr: 2.0e-4
   grad_clip: 1.0

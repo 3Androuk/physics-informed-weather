@@ -38,7 +38,8 @@ class ConditionalTransportUNet(nn.Module):
         if self.geo is not None:
             if coords is None:
                 raise ValueError("geo-conditioned transport model needs coordinates")
-            emb = self.geo(coords)
+            from models.geo_encoding import checkpointed_embed
+            emb = checkpointed_embed(self.geo, coords)
             if self.gate is not None:
                 # transport time runs 0 (noise) -> 1 (data): t IS the signal fraction
                 emb = self.gate(emb, t.float().clamp(0.0, 1.0))
