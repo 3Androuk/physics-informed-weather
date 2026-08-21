@@ -135,9 +135,7 @@ def wrap_model(model: torch.nn.Module, ctx: DistContext, cfg: dict | None = None
     broadcast_buffers=False: every buffer in these models is a constant
     (hash-grid primes, sinusoidal freqs, ...), identical on all ranks by
     construction — skipping the broadcast removes a per-forward collective and
-    keeps rank-0-only validation through the raw module safe. (torch >= 2.13
-    warns that the flag is renamed to forward_sync_buffers; the old name is
-    kept for the torch >= 2.2 floor in requirements.txt and works on both.)
+    keeps rank-0-only validation through the raw module safe.
     """
     if not ctx.enabled:
         return model
