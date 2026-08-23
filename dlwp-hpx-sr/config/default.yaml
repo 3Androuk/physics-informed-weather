@@ -1,0 +1,62 @@
+# DLWP-HPX backbone (Karlbauer et al. 2024) for ERA5 t2m super-resolution.
+
+seed: 42
+
+paths:
+  hpx_dir: datasets/hpx          # remapped HEALPix face arrays + norm stats
+  ckpt_dir: checkpoints
+  results_dir: results
+
+data:
+  # WB2 public GCS store, 0.7 deg (512x256) conservative regrid, no auth.
+  # Comfortably finer than HPX64 (~0.92 deg); for nside > 64 switch to the
+  # 0.25 deg store: gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-512x256_equiangular_conservative.zarr"
+  gcs_token: anon
+  variable: 2m_temperature       # t2m; the store runs 1959..2021
+  train_years: [2007, 2015]
+  test_years: [2016, 2017]
+  time_stride: 4                 # every Nth 6-hourly step -> daily samples
+
+hpx:
+  nside: 64                      # 12x64x64 = 49,152 pixels, ~0.92 deg
+
+sr:
+  ratio: 4                       # HPX64 -> HPX16 (~3.7 deg) degradation
+
+model:
+  in_channels: 1
+  out_channels: 1
+  channels: [64, 128, 256]       # per U-Net level (face 64 -> 32 -> 16)
+  dilations: [1, 2, 4]           # conv dilation per level, as in DLWP-HPX
+  blocks_per_level: 2            # ConvNeXt blocks per encoder/decoder level
+  expansion: 4                   # pointwise MLP expansion inside each block
+  gelu_cap: 10.0                 # capped GELU, as in DLWP-HPX
+  global_residual: true          # predict a correction to the upsampled input
+
+train:
+  batch_size: 8                  # (B, 12, 1, 64, 64) faces; drop to 4 if OOM
+  epochs: 100
+  lr: 2.0e-4
+  weight_decay: 1.0e-5
+  cosine_lr: true
+  grad_clip: 1.0
+  amp: false                     # fp32 by default (fp16 NaN'ed in the sibling project)
+  val_fraction: 0.1              # time-ordered tail of the train years
+  num_workers: 4
+  log_every: 50
+  ckpt_every_epochs: 1           # atomic overwrite; a crash loses at most one epoch
+
+eval:
+  checkpoint: best.pt            # which checkpoint eval/evaluate_sr.py loads
+  n_test_samples: null           # null -> the whole test split
+  hist_bins: 100
+  n_map_samples: 3               # global map figures rendered per run
+  lat_bands: [[-90, -60], [-60, -20], [-20, 20], [20, 60], [60, 90]]
+
+# Weights & Biases (opt-in). Set enabled: true, or pass --wandb.
+wandb:
+  enabled: false
+  project: dlwp-hpx-sr
+  entity: null                   # null -> your default wandb entity
+  name: null                     # null -> wandb auto-generates a run name
