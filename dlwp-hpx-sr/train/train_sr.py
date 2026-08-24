@@ -137,11 +137,12 @@ def main():
             sched.step()
 
         val_rmse = validate(model, val_loader, ratio, device)
+        units = cfg["data"].get("units", "phys")
         print(f"epoch {epoch:03d} | val rmse (norm) {val_rmse:.5f} "
-              f"({val_rmse * normalizer.std:.3f} K)")
+              f"({val_rmse * normalizer.std:.3f} {units})")
         if wb_run is not None:
             wb_run.log({"val/rmse_norm": val_rmse,
-                        "val/rmse_K": val_rmse * normalizer.std,
+                        "val/rmse_phys": val_rmse * normalizer.std,
                         "epoch": epoch}, step=step)
 
         for p in model.parameters():

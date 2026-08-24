@@ -1,12 +1,15 @@
-# DLWP-HPX backbone for weather super-resolution (t2m)
+# DLWP-HPX backbone for weather super-resolution
 
 The backbone of **DLWP-HPX** — Karlbauer et al. (2024), *"Advancing
 Parsimonious Deep Learning Weather Prediction Using the HEALPix Mesh"*, JAMES
-16, e2023MS004021 — applied to a new task: **super-resolution of ERA5 2-meter
-temperature (t2m) on the HEALPix mesh**.
+16, e2023MS004021 — applied to a new task: **super-resolution of ERA5 fields
+on the HEALPix mesh**. The default config runs Z500 at HPX256 on the same
+data as the sibling `era5-diffusion-downscaling` project (for head-to-head
+comparison with its diffusion / direct-map / bicubic models); a second config
+runs the lighter standalone t2m study at HPX64.
 
 The original DLWP-HPX is a forecasting model; here its *spatial* backbone is
-used as a direct mapping `f: degraded t2m -> high-res t2m` on the sphere.
+used as a direct mapping `f: degraded field -> high-res field` on the sphere.
 
 ## What is taken from the paper
 
@@ -42,15 +45,33 @@ which would catch any sheared, rotated or misplaced halo assignment.
 
 ## Task setup
 
-- **Grid:** HPX64 (nside 64, 12×64×64 = 49,152 pixels, ~0.92°), remapped
-  bilinearly from the WeatherBench 2 ERA5 0.7° (512×256) conservative regrid.
-- **Degradation:** average-pool each face 4× — because of the nested
-  ordering this is *exactly* the HEALPix coarsening to HPX16 (~3.7°) — then
-  nearest-upsample back to the HPX64 grid as model input.
+Two configs, same code:
+
+**`config/default.yaml` — Z500 @ HPX256 (the comparison setup).** Identical
+data to the sibling `era5-diffusion-downscaling` project — Z500 (geopotential
+@ 500 hPa) from the WB2 0.25° (1440×721) store, train 2007–2015 / test
+2016–2017, every 4th 6-hourly step — remapped to HPX256 (12×256×256 =
+786,432 pixels, ~0.23°, the HEALPix match of 0.25°). The 4× ratio then
+reproduces that project's 0.25°→1° reconstruction task, so this model can be
+evaluated head-to-head against its diffusion / direct-map / bicubic models
+(remap predictions to the lat-lon grid with `hpx.remap.hpx_to_latlon` and
+score with that project's metrics on its ±60° test patches). One sample is
+the whole globe; `grad_checkpoint: true` makes batch 2 fit in 8 GB.
+Transfer ~17 GB streamed, ~13 GB on disk — the full globe is needed because
+the mesh includes the poles, so the sibling's ±60° band cache can't be reused.
+
+**`config/t2m_hpx64.yaml` — t2m @ HPX64 (the light standalone study).** 2m
+temperature from the 0.7° store remapped to HPX64 (~0.92°), 4× SR from
+HPX16 (~3.7°). ~2 GB streamed, trains comfortably without checkpointing.
+
+Common to both:
+
+- **Degradation:** average-pool each face `ratio`× — because of the nested
+  ordering this is *exactly* HEALPix coarsening to nside/ratio — then
+  nearest-upsample back to the target grid as model input.
 - **Model:** HEALPix U-Net (`models/hpx_unet.py`), MSE in z-score space,
   global residual (the net predicts a correction to the upsampled input).
-- **Split:** train 2007–2015 (validation = time-ordered tail), test 2016–2017,
-  daily samples (every 4th 6-hourly step).
+- **Split:** validation = time-ordered tail of the train years (no leakage).
 - **Baselines:** seam-aware bilinear upsampling (coarse faces padded with a
   1-pixel HEALPix halo before interpolation) and nearest (the input itself).
 
@@ -59,7 +80,7 @@ which would catch any sheared, rotated or misplaced halo assignment.
 ```bash
 pip install -r requirements.txt   # install torch with the right CUDA build first
 
-# 1. Data: stream ERA5 t2m from WB2 GCS, remap to HEALPix, cache faces (~300MB)
+# 1. Data: stream ERA5 from WB2 GCS, remap to HEALPix faces, cache (resumable)
 python -m data.download_era5   --config config/default.yaml
 
 # 2. Train
@@ -72,6 +93,10 @@ python -m eval.evaluate_sr     --config config/default.yaml
 python -m tests.test_hpx
 ```
 
+Swap `--config config/t2m_hpx64.yaml` into any of the three commands for the
+light t2m study; each config keeps its own `datasets/`, `checkpoints/` and
+`results/` subdirectories, so the two experiments never collide.
+
 Weights & Biases is opt-in, as in the sibling projects: `wandb login` once,
 then set `wandb.enabled: true` in the config or pass `--wandb`. Training logs
 loss/validation curves; evaluation logs the metrics and figures.
@@ -79,7 +104,7 @@ loss/validation curves; evaluation logs the metrics and figures.
 ## Evaluation
 
 `eval/evaluate_sr.py` compares model / bilinear / nearest in physical units
-(K) on the test split: global RMSE / MAE / bias, RMSE per latitude band, and
+on the test split: global RMSE / MAE / bias, RMSE per latitude band, and
 value histograms — all computed on the mesh (equal-area, no weighting) — plus
 global maps (truth / input / model / error) remapped back to lat-lon.
 

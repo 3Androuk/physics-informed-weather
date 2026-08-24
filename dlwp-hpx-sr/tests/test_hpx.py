@@ -214,6 +214,17 @@ def test_model_forward_backward():
     grads = [p.grad for p in model.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
 
+    # gradient checkpointing must give the same output and finite grads
+    model_ck = HEALPixUNetSR(nside=nside, channels=(8, 12, 16), dilations=(1, 2, 2),
+                             blocks_per_level=1, expansion=2, grad_checkpoint=True)
+    model_ck.load_state_dict(model.state_dict())
+    model_ck.train()
+    out_ck = model_ck(x)
+    assert torch.allclose(out_ck, out, atol=1e-6)
+    out_ck.square().mean().backward()
+    grads_ck = [p.grad for p in model_ck.parameters() if p.grad is not None]
+    assert grads_ck and all(torch.isfinite(g).all() for g in grads_ck)
+
 
 def test_training_step_reduces_loss():
     torch.manual_seed(0)

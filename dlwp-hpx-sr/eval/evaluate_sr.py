@@ -1,11 +1,11 @@
-"""Evaluate the trained DLWP-HPX SR model on the t2m test split.
+"""Evaluate the trained DLWP-HPX SR model on the test split.
 
 Compares three reconstructions of the high-res field from the degraded input:
   * model      — the trained HEALPix U-Net,
   * bilinear   — seam-aware bilinear upsampling of the coarse field,
   * nearest    — the input itself (each coarse pixel repeated; lower bound).
 
-Metrics (physical units, K) are computed directly on the mesh — HEALPix
+Metrics (physical units) are computed directly on the mesh — HEALPix
 pixels are equal-area, so plain means are already area-fair:
   * global RMSE / MAE / bias,
   * RMSE per latitude band (from pixel-center latitudes),
@@ -65,6 +65,10 @@ def main():
     ec = cfg["eval"]
     ratio = int(cfg["sr"]["ratio"])
     nside = int(cfg["hpx"]["nside"])
+    var = cfg["data"]["variable"]
+    if cfg["data"].get("level") is not None:
+        var = f"{var}@{cfg['data']['level']}"
+    units = cfg["data"].get("units", "phys")
     hpx_dir = Path(cfg["paths"]["hpx_dir"])
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
 
@@ -133,14 +137,15 @@ def main():
                 h, _ = np.histogram(pred_K, bins=ec["hist_bins"], range=hist_range)
                 hists[m] = h if hists[m] is None else hists[m] + h
 
-    metrics = {"n_samples": n, "ratio": ratio, "nside": nside}
+    metrics = {"n_samples": n, "ratio": ratio, "nside": nside,
+               "variable": var, "units": units}
     for m in methods:
         metrics[m] = {
-            "rmse_K": float(np.sqrt(sq_err[m] / n_px)),
-            "mae_K": abs_err[m] / n_px,
-            "bias_K": bias[m] / n_px,
-            "rmse_by_band_K": {b: float(np.sqrt(band_sq[m][b] / band_n[b]))
-                               for b in band_masks},
+            "rmse": float(np.sqrt(sq_err[m] / n_px)),
+            "mae": abs_err[m] / n_px,
+            "bias": bias[m] / n_px,
+            "rmse_by_band": {b: float(np.sqrt(band_sq[m][b] / band_n[b]))
+                             for b in band_masks},
         }
     with open(results_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -158,9 +163,9 @@ def main():
     for m, style in (("truth", "k-"), ("model", "C0-"),
                      ("bilinear", "C1--"), ("nearest", "C2:")):
         ax.plot(centers, hists[m] / (n_px * np.diff(edges)), style, label=m)
-    ax.set_xlabel("t2m [K]")
+    ax.set_xlabel(f"{var} [{units}]")
     ax.set_ylabel("density")
-    ax.set_title(f"t2m value distribution ({ratio}x SR, nside {nside})")
+    ax.set_title(f"{var} value distribution ({ratio}x SR, nside {nside})")
     ax.legend()
     fig.tight_layout()
     hist_path = results_dir / "histograms.png"
@@ -204,7 +209,7 @@ def main():
             title = f"sample {i}"
             if times is not None:
                 title += f" | {np.datetime_as_string(times[i], unit='h')}"
-            fig.suptitle(f"t2m {ratio}x SR on HPX{nside} — {title}")
+            fig.suptitle(f"{var} {ratio}x SR on HPX{nside} — {title}")
             fig.tight_layout()
             p = results_dir / f"map_{i:02d}.png"
             fig.savefig(p, dpi=150)
@@ -218,7 +223,7 @@ def main():
         for p in map_paths:
             log[f"eval/{p.stem}"] = wandb.Image(str(p))
         for m in methods:
-            log[f"eval/rmse_K/{m}"] = metrics[m]["rmse_K"]
+            log[f"eval/rmse/{m}"] = metrics[m]["rmse"]
         wb_run.log(log)
         wb_run.finish()
 

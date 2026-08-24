@@ -1,0 +1,64 @@
+# Lighter t2m experiment: 2m temperature at HPX64 (~0.92 deg) from the 0.7 deg
+# WB2 store (~2GB streamed, ~800MB on disk). Not comparable with the sibling
+# era5-diffusion-downscaling models (different variable & resolution) — use
+# config/default.yaml for that; this is the quick standalone t2m study.
+
+seed: 42
+
+paths:
+  hpx_dir: datasets/hpx_t2m_64
+  ckpt_dir: checkpoints/t2m_hpx64
+  results_dir: results/t2m_hpx64
+
+data:
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-512x256_equiangular_conservative.zarr"
+  gcs_token: anon
+  variable: 2m_temperature       # t2m; the store runs 1959..2021
+  level: null                    # surface variable
+  units: "K"                     # label used in logs/metrics/figures
+  train_years: [2007, 2015]
+  test_years: [2016, 2017]
+  time_stride: 4                 # every Nth 6-hourly step -> daily samples
+
+hpx:
+  nside: 64                      # 12x64x64 = 49,152 pixels, ~0.92 deg
+
+sr:
+  ratio: 4                       # HPX64 -> HPX16 (~3.7 deg) degradation
+
+model:
+  in_channels: 1
+  out_channels: 1
+  channels: [64, 128, 256]       # per U-Net level (face 64 -> 32 -> 16)
+  dilations: [1, 2, 4]
+  blocks_per_level: 2
+  expansion: 4
+  gelu_cap: 10.0
+  global_residual: true
+  grad_checkpoint: false         # HPX64 fits comfortably without it
+
+train:
+  batch_size: 8                  # (B, 12, 1, 64, 64) faces; drop to 4 if OOM
+  epochs: 100
+  lr: 2.0e-4
+  weight_decay: 1.0e-5
+  cosine_lr: true
+  grad_clip: 1.0
+  amp: false
+  val_fraction: 0.1
+  num_workers: 4
+  log_every: 50
+  ckpt_every_epochs: 1
+
+eval:
+  checkpoint: best.pt
+  n_test_samples: null
+  hist_bins: 100
+  n_map_samples: 3
+  lat_bands: [[-90, -60], [-60, -20], [-20, 20], [20, 60], [60, 90]]
+
+wandb:
+  enabled: false
+  project: dlwp-hpx-sr
+  entity: null
+  name: null

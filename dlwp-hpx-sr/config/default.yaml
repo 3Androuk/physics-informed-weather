@@ -1,42 +1,53 @@
-# DLWP-HPX backbone (Karlbauer et al. 2024) for ERA5 t2m super-resolution.
+# DLWP-HPX backbone (Karlbauer et al. 2024) for ERA5 super-resolution.
+#
+# DEFAULT = the comparison setup: SAME data as era5-diffusion-downscaling
+# (Z500 from the 0.25 deg WB2 store, train 2007-2015 / test 2016-2017,
+# stride 4), remapped to HPX256 (~0.23 deg, the HEALPix match of 0.25 deg).
+# ratio 4 then reproduces that project's 0.25 -> 1 deg task, so this model
+# can be evaluated head-to-head against its diffusion / direct-map / bicubic.
+# For the lighter t2m experiment use config/t2m_hpx64.yaml.
 
 seed: 42
 
 paths:
-  hpx_dir: datasets/hpx          # remapped HEALPix face arrays + norm stats
-  ckpt_dir: checkpoints
-  results_dir: results
+  hpx_dir: datasets/hpx_z500_256   # remapped HEALPix face arrays + norm stats
+  ckpt_dir: checkpoints/z500_hpx256
+  results_dir: results/z500_hpx256
 
 data:
-  # WB2 public GCS store, 0.7 deg (512x256) conservative regrid, no auth.
-  # Comfortably finer than HPX64 (~0.92 deg); for nside > 64 switch to the
-  # 0.25 deg store: gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr
-  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-512x256_equiangular_conservative.zarr"
+  # Same store/variable/split as era5-diffusion-downscaling/config/default.yaml.
+  # Full globe (no lat band: the HEALPix mesh needs the poles).
+  # Transfer ~17GB streamed; ~13GB of face arrays kept on disk.
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
   gcs_token: anon
-  variable: 2m_temperature       # t2m; the store runs 1959..2021
+  variable: geopotential         # Z500 = geopotential @ 500 hPa
+  level: 500                     # omit/null for surface variables (t2m)
+  units: "m^2/s^2"               # label used in logs/metrics/figures
   train_years: [2007, 2015]
   test_years: [2016, 2017]
   time_stride: 4                 # every Nth 6-hourly step -> daily samples
 
 hpx:
-  nside: 64                      # 12x64x64 = 49,152 pixels, ~0.92 deg
+  nside: 256                     # 12x256x256 = 786,432 pixels, ~0.23 deg
 
 sr:
-  ratio: 4                       # HPX64 -> HPX16 (~3.7 deg) degradation
+  ratio: 4                       # HPX256 -> HPX64 (~0.92 deg), like 0.25 -> 1 deg
 
 model:
   in_channels: 1
   out_channels: 1
-  channels: [64, 128, 256]       # per U-Net level (face 64 -> 32 -> 16)
+  channels: [64, 128, 256]       # per U-Net level (face 256 -> 128 -> 64)
   dilations: [1, 2, 4]           # conv dilation per level, as in DLWP-HPX
   blocks_per_level: 2            # ConvNeXt blocks per encoder/decoder level
   expansion: 4                   # pointwise MLP expansion inside each block
   gelu_cap: 10.0                 # capped GELU, as in DLWP-HPX
   global_residual: true          # predict a correction to the upsampled input
+  grad_checkpoint: true          # recompute activations: HPX256 on 8GB GPUs
 
 train:
-  batch_size: 8                  # (B, 12, 1, 64, 64) faces; drop to 4 if OOM
-  epochs: 100
+  batch_size: 2                  # one sample = the whole globe (12x256x256);
+                                 # 2 fits 8GB with grad_checkpoint, raise on bigger GPUs
+  epochs: 50
   lr: 2.0e-4
   weight_decay: 1.0e-5
   cosine_lr: true

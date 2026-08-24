@@ -1,27 +1,25 @@
-"""Stream ERA5 t2m from the WeatherBench 2 public GCS store and remap to HEALPix.
+"""Stream an ERA5 variable from the WeatherBench 2 public GCS store onto HEALPix.
 
-Downloads 2m_temperature for the configured train/test year ranges and remaps
-every field to the 12 HEALPix faces (config hpx.nside) as it arrives, so only
-the compact face arrays are cached on disk:
+Downloads the configured variable (surface, e.g. 2m_temperature, or a
+pressure-level one like geopotential @ data.level) for the train/test year
+ranges and remaps every field to the 12 HEALPix faces (config hpx.nside) as
+it arrives, so only the face arrays are cached on disk:
 
-    datasets/hpx/train.npy        (T, 12, nside, nside) float32
-    datasets/hpx/test.npy
-    datasets/hpx/{train,test}_times.npy   (T,) datetime64
-    datasets/hpx/norm_stats.npz   scalar mean/std of the train split (K)
-    datasets/hpx/coords.npz       source lat/lon grid (for eval remap-back)
+    <hpx_dir>/train.npy        (T, 12, nside, nside) float32
+    <hpx_dir>/test.npy
+    <hpx_dir>/{train,test}_times.npy   (T,) datetime64
+    <hpx_dir>/norm_stats.npz   scalar mean/std of the train split (physical units)
+    <hpx_dir>/coords.npz       source lat/lon grid (for eval remap-back)
 
 Built to survive a slow / flaky link to GCS (same scheme as the sibling
-era5-diffusion-downscaling downloader):
-  * ONE YEAR AT A TIME, each written to datasets/hpx/_years/ as it finishes —
+era5-diffusion-downscaling downloader — and with the default config the SAME
+store / variable / level / years / stride as that project, so the two are
+directly comparable):
+  * ONE YEAR AT A TIME, each written to <hpx_dir>/_years/ as it finishes —
     a rerun skips every year already on disk (resume).
   * Each year is read in SMALL TIME-BATCHES so every HTTP request completes
     well within --timeout; a stalled batch is retried (with a fresh
     connection) up to --max-retries, costing one batch rather than a year.
-
-The default store is the 0.7 deg (512x256) conservative regrid — comfortably
-finer than HPX64 (~0.92 deg) and ~8x less transfer than the 0.25 deg store.
-For nside > 64 switch data.era5_zarr to the 0.25 deg store
-(gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr).
 
 Run:
     python -m data.download_era5 --config config/default.yaml
@@ -61,8 +59,12 @@ def _open_da(dcfg, timeout, chunk_time):
 
     da = ds[dcfg["variable"]]
     if "level" in da.dims:
-        raise ValueError(f"{dcfg['variable']} has a level dim; expected a "
-                         "surface variable like 2m_temperature")
+        if dcfg.get("level") is None:
+            raise ValueError(f"{dcfg['variable']} has a level dim; set "
+                             "data.level (e.g. 500 for Z500)")
+        da = da.sel(level=dcfg["level"])
+    elif dcfg.get("level") is not None:
+        raise ValueError(f"data.level set but {dcfg['variable']} has no level dim")
     da = da.transpose("time", "latitude", "longitude")
     lat = da["latitude"].values
     if lat[0] > lat[-1]:  # some stores order latitude north->south
@@ -221,7 +223,8 @@ def main():
     mean = s / n
     std = float(np.sqrt(max(ss / n - mean ** 2, 1e-12)))
     np.savez(Path(hpx_dir) / "norm_stats.npz", mean=mean, std=std)
-    print(f"norm stats: mean={mean:.3f} K  std={std:.3f} K", flush=True)
+    units = dcfg.get("units", "")
+    print(f"norm stats: mean={mean:.3f} {units}  std={std:.3f} {units}", flush=True)
 
     # ── Cleanup per-year caches ───────────────────────────────────────────
     if not args.keep_cache:

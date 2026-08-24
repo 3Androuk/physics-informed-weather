@@ -92,8 +92,12 @@ class HEALPixUNetSR(nn.Module):
     def __init__(self, nside: int, in_channels: int = 1, out_channels: int = 1,
                  channels=(64, 128, 256), dilations=(1, 2, 4),
                  blocks_per_level: int = 2, expansion: int = 4,
-                 gelu_cap: float = 10.0, global_residual: bool = True):
+                 gelu_cap: float = 10.0, global_residual: bool = True,
+                 grad_checkpoint: bool = False):
         super().__init__()
+        # Recompute block activations in backward instead of storing them —
+        # needed to fit fine meshes (HPX256) in small GPU memory.
+        self.grad_checkpoint = bool(grad_checkpoint)
         depth = len(channels)
         if len(dilations) != depth:
             raise ValueError("dilations must match channels in length")
@@ -124,19 +128,26 @@ class HEALPixUNetSR(nn.Module):
             for i in reversed(range(depth - 1)))
         self.head = nn.Conv2d(channels[0], out_channels, 1)
 
+    def _blocks(self, seq, h):
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            for blk in seq:
+                h = torch.utils.checkpoint.checkpoint(blk, h, use_reentrant=False)
+            return h
+        return seq(h)
+
     def forward(self, x):
         b, nf, c, fs, _ = x.shape
         h = x.reshape(b * nf, c, fs, fs)
         inp = h
         skips = []
         for i, enc in enumerate(self.encoders):
-            h = enc(h)
+            h = self._blocks(enc, h)
             if i < len(self.encoders) - 1:
                 skips.append(h)
                 h = self.downs[i](h)
         for up, dec, skip in zip(self.ups, self.decoders, reversed(skips)):
             h = up(h)
-            h = dec(torch.cat([h, skip], dim=1))
+            h = self._blocks(dec, torch.cat([h, skip], dim=1))
         h = self.head(h)
         if self.global_residual:
             h = h + inp
@@ -155,6 +166,7 @@ def build_model(cfg: dict) -> HEALPixUNetSR:
         expansion=m["expansion"],
         gelu_cap=m["gelu_cap"],
         global_residual=m["global_residual"],
+        grad_checkpoint=m.get("grad_checkpoint", False),
     )
 
 
