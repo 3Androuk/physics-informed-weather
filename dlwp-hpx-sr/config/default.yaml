@@ -1,28 +1,29 @@
 # DLWP-HPX backbone (Karlbauer et al. 2024) for ERA5 super-resolution.
 #
-# DEFAULT = the comparison setup: SAME data as era5-diffusion-downscaling
-# (Z500 from the 0.25 deg WB2 store, train 2007-2015 / test 2016-2017,
-# stride 4), remapped to HPX256 (~0.23 deg, the HEALPix match of 0.25 deg).
-# ratio 4 then reproduces that project's 0.25 -> 1 deg task, so this model
-# can be evaluated head-to-head against its diffusion / direct-map / bicubic.
-# For the lighter t2m experiment use config/t2m_hpx64.yaml.
+# DEFAULT = the comparison setup: t2m at the SAME resolution/split as the
+# era5-diffusion-downscaling models it will be compared against (0.25 deg
+# WB2 store, train 2007-2015 / test 2016-2017, stride 4), remapped to
+# HPX256 (~0.23 deg, the HEALPix match of 0.25 deg). ratio 4 then
+# reproduces that project's 0.25 -> 1 deg task. For a pressure-level
+# variable instead (e.g. Z500), set variable: geopotential, level: 500.
+# For the lighter/coarser t2m experiment use config/t2m_hpx64.yaml.
 
 seed: 42
 
 paths:
-  hpx_dir: datasets/hpx_z500_256   # remapped HEALPix face arrays + norm stats
-  ckpt_dir: checkpoints/z500_hpx256
-  results_dir: results/z500_hpx256
+  hpx_dir: datasets/hpx_t2m_256    # remapped HEALPix face arrays + norm stats
+  ckpt_dir: checkpoints/t2m_hpx256
+  results_dir: results/t2m_hpx256
 
 data:
-  # Same store/variable/split as era5-diffusion-downscaling/config/default.yaml.
+  # Same 0.25 deg store and time split as era5-diffusion-downscaling.
   # Full globe (no lat band: the HEALPix mesh needs the poles).
   # Transfer ~17GB streamed; ~13GB of face arrays kept on disk.
   era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
   gcs_token: anon
-  variable: geopotential         # Z500 = geopotential @ 500 hPa
-  level: 500                     # omit/null for surface variables (t2m)
-  units: "m^2/s^2"               # label used in logs/metrics/figures
+  variable: 2m_temperature       # t2m; set geopotential + level for Z500 etc.
+  level: null                    # pressure level for level variables, else null
+  units: "K"                     # label used in logs/metrics/figures
   train_years: [2007, 2015]
   test_years: [2016, 2017]
   time_stride: 4                 # every Nth 6-hourly step -> daily samples

@@ -2,11 +2,12 @@
 
 The backbone of **DLWP-HPX** — Karlbauer et al. (2024), *"Advancing
 Parsimonious Deep Learning Weather Prediction Using the HEALPix Mesh"*, JAMES
-16, e2023MS004021 — applied to a new task: **super-resolution of ERA5 fields
-on the HEALPix mesh**. The default config runs Z500 at HPX256 on the same
-data as the sibling `era5-diffusion-downscaling` project (for head-to-head
-comparison with its diffusion / direct-map / bicubic models); a second config
-runs the lighter standalone t2m study at HPX64.
+16, e2023MS004021 — applied to a new task: **super-resolution of ERA5 t2m
+(2-meter temperature) on the HEALPix mesh**. The default config runs t2m at
+HPX256, matching the resolution and time split of the sibling
+`era5-diffusion-downscaling` models it is compared against; a second config
+runs a lighter/coarser t2m study at HPX64. The variable is configurable
+(e.g. `geopotential` + `level: 500` for Z500).
 
 The original DLWP-HPX is a forecasting model; here its *spatial* backbone is
 used as a direct mapping `f: degraded field -> high-res field` on the sphere.
@@ -47,22 +48,24 @@ which would catch any sheared, rotated or misplaced halo assignment.
 
 Two configs, same code:
 
-**`config/default.yaml` — Z500 @ HPX256 (the comparison setup).** Identical
-data to the sibling `era5-diffusion-downscaling` project — Z500 (geopotential
-@ 500 hPa) from the WB2 0.25° (1440×721) store, train 2007–2015 / test
-2016–2017, every 4th 6-hourly step — remapped to HPX256 (12×256×256 =
-786,432 pixels, ~0.23°, the HEALPix match of 0.25°). The 4× ratio then
-reproduces that project's 0.25°→1° reconstruction task, so this model can be
-evaluated head-to-head against its diffusion / direct-map / bicubic models
-(remap predictions to the lat-lon grid with `hpx.remap.hpx_to_latlon` and
-score with that project's metrics on its ±60° test patches). One sample is
-the whole globe; `grad_checkpoint: true` makes batch 2 fit in 8 GB.
-Transfer ~17 GB streamed, ~13 GB on disk — the full globe is needed because
-the mesh includes the poles, so the sibling's ±60° band cache can't be reused.
+**`config/default.yaml` — t2m @ HPX256 (the comparison setup).** t2m from
+the WB2 0.25° (1440×721) store with the same time split as the sibling
+`era5-diffusion-downscaling` project — train 2007–2015 / test 2016–2017,
+every 4th 6-hourly step — remapped to HPX256 (12×256×256 = 786,432 pixels,
+~0.23°, the HEALPix match of 0.25°). The 4× ratio then reproduces that
+project's 0.25°→1° reconstruction task, so this model can be evaluated
+head-to-head against its diffusion / direct-map / bicubic models trained on
+the same fields (remap predictions to the lat-lon grid with
+`hpx.remap.hpx_to_latlon` and score with that project's metrics on its ±60°
+test patches). One sample is the whole globe; `grad_checkpoint: true` makes
+batch 2 fit in 8 GB. Transfer ~17 GB streamed, ~13 GB on disk — the full
+globe is needed because the mesh includes the poles, so a ±60°-band cache
+from the sibling downloader can't be reused directly.
 
 **`config/t2m_hpx64.yaml` — t2m @ HPX64 (the light standalone study).** 2m
 temperature from the 0.7° store remapped to HPX64 (~0.92°), 4× SR from
 HPX16 (~3.7°). ~2 GB streamed, trains comfortably without checkpointing.
+Not resolution-matched to the sibling models — quick experiments only.
 
 Common to both:
 
