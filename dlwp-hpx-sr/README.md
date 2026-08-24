@@ -83,8 +83,16 @@ Common to both:
 ```bash
 pip install -r requirements.txt   # install torch with the right CUDA build first
 
-# 1. Data: stream ERA5 from WB2 GCS, remap to HEALPix faces, cache (resumable)
+# 1a. Data from scratch: stream ERA5 from WB2 GCS, remap to HEALPix (resumable)
 python -m data.download_era5   --config config/default.yaml
+
+# 1b. OR reuse an existing era5-diffusion-downscaling raw download (same
+#     variable/store/years/stride as the config): remaps it to HEALPix faces,
+#     fetching ONLY the polar rows if the raw file is a latitude band
+#     (~1/3 of the full transfer; nothing at all if it is already global).
+#     Verified to produce bit-identical output to a full download.
+python -m data.build_from_raw  --config config/default.yaml \
+    --raw-dir ../era5-diffusion-downscaling/datasets/raw
 
 # 2. Train
 python -m train.train_sr       --config config/default.yaml
