@@ -51,6 +51,8 @@ def _metrics(pred_K: np.ndarray, truth_K: np.ndarray, band_masks) -> dict:
 
 
 def main():
+    # Line-buffer stdout so progress shows up live under `| tee` / tmux pipes.
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--wandb", action="store_true",
