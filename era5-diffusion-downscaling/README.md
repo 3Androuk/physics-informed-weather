@@ -293,6 +293,17 @@ Headline table: rows `{4× in-dist, 8× out-of-dist}` × columns
   Interpolants: A Unifying Framework for Flows and Diffusions.*
   https://arxiv.org/abs/2303.08797
 
+**Data-consistency projection (`--project` / per-step anchoring):**
+- Wang, Y., Yu, J., Zhang, J. (2023). *Zero-Shot Image Restoration Using
+  Denoising Diffusion Null-Space Model* (DDNM). ICLR.
+  https://arxiv.org/abs/2212.00490 — the exact range/null-space projection
+  x + A†(y - Ax) applied to the x0 estimate at each step; exact here because
+  A is a block average and A† its nearest-upsampling pseudo-inverse.
+- Choi, J., Kim, S., Jeong, Y., Gwon, Y., Yoon, S. (2021). *ILVR: Conditioning
+  Method for Denoising Diffusion Probabilistic Models.* ICCV.
+  https://arxiv.org/abs/2108.02938 — the ancestor: per-step low-frequency
+  replacement on the noisy iterate.
+
 **Residual (split-model) diffusion:**
 - Mardani, M., et al. (2025). *Residual corrective diffusion modeling for
   km-scale atmospheric downscaling* (CorrDiff). Communications Earth &
