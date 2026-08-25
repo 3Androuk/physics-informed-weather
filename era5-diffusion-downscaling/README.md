@@ -74,7 +74,7 @@ holds the patches and diffusion checkpoint:
 ```bash
 python -m data.estimate_spectral_covariance --config config/t2m.yaml
 python -m eval.compare_weather_ddnm --config config/t2m.yaml \
-  --ckpt diffusion.pt --primary-only
+  --ckpt diffusion.pt --primary-only --wandb
 # Optional single-start-time sweep:
 python -m eval.compare_weather_ddnm --config config/t2m.yaml --t0 160
 ```

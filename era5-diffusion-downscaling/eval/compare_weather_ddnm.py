@@ -38,7 +38,8 @@ from eval.metrics import l2_norm, radial_power_spectrum, spectrum_log_l1  # noqa
 from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
                                 reconstruct_diffusion)
 from sample.weather_ddnm import SpectralCovarianceProjector  # noqa: E402
-from utils import ensure_dir, get_device, load_config  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   run_name)
 
 
 def _geo_payload(patch_dir, normalizer, n, geo_cfg, device):
@@ -154,12 +155,16 @@ def main():
     parser.add_argument("--t0", type=int, default=None,
                         help="Use a single outer loop starting at this DDIM time.")
     parser.add_argument("--eta", type=float, default=None)
+    parser.add_argument("--wandb", action="store_true",
+                        help="Upload metrics, figures, and covariance artifact to W&B.")
     parser.add_argument("--primary-only", action="store_true",
                         help="Compare no projection, ordinary DDNM, spectral "
                              "Weather-DDNM, and bicubic; skip initialization ablations.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.wandb:
+        cfg.setdefault("wandb", {})["enabled"] = True
     if cfg["data"]["variable"] != "2m_temperature" or cfg["unet"]["in_channels"] != 1:
         raise ValueError("this Weather-DDNM experiment is intentionally scoped to T2M")
     device = get_device()
@@ -269,6 +274,62 @@ def main():
     with open(output_dir / "metrics.json", "w") as handle:
         json.dump(metadata, handle, indent=2)
     print(f"saved Weather-DDNM ablation to {output_dir}")
+
+    wb_run, wandb = init_wandb(
+        cfg, job_type="compare_weather_ddnm",
+        extra_config={
+            "weather_ddnm_eval": {
+                "checkpoint": str(ckpt_path),
+                "covariance": str(covariance_path),
+                "seed": seed,
+                "n_test_patches": n,
+                "eta": eta,
+                "t0_override": args.t0,
+                "primary_only": args.primary_only,
+                "arms": list(arms) + ["bicubic"],
+            },
+        },
+        name=run_name(
+            cfg, "weather-ddnm", Path(args.ckpt).stem,
+            "primary" if args.primary_only else "full-ablation",
+            f"seed{seed}"),
+    )
+    if wb_run is not None:
+        table = wandb.Table(columns=[
+            "ratio", "method", "l2_kelvin", "spectrum_log_l1",
+            "coarse_rmse_kelvin",
+        ])
+        for ratio_tag, row in results.items():
+            for method, values in row.items():
+                table.add_data(
+                    ratio_tag, method, values["l2_kelvin"],
+                    values["spectrum_log_l1"], values["coarse_rmse_kelvin"])
+                for metric, value in values.items():
+                    wb_run.summary[f"{ratio_tag}/{method}/{metric}"] = value
+
+        log = {"weather_ddnm/metrics": table}
+        for recon_cfg in cfg["sample"]["reconstructions"]:
+            ratio_tag = f"{int(recon_cfg['ratio'])}x"
+            log[f"weather_ddnm/qualitative_{ratio_tag}"] = wandb.Image(
+                str(output_dir / f"qualitative_{ratio_tag}.png"))
+            log[f"weather_ddnm/spectrum_{ratio_tag}"] = wandb.Image(
+                str(output_dir / f"spectrum_{ratio_tag}.png"))
+        wb_run.log(log)
+
+        result_artifact = wandb.Artifact(
+            name=f"weather-ddnm-results-{wb_run.id}", type="evaluation",
+            metadata={"seed": seed, "n_test_patches": n,
+                      "primary_only": args.primary_only})
+        result_artifact.add_file(str(output_dir / "metrics.json"))
+        wb_run.log_artifact(result_artifact)
+
+        covariance_artifact = wandb.Artifact(
+            name="t2m-spectral-covariance", type="weather-covariance",
+            metadata={**weather_cfg, "source_path": str(covariance_path)})
+        covariance_artifact.add_file(str(covariance_path))
+        wb_run.log_artifact(covariance_artifact)
+        wb_run.finish()
+        print(f"wandb: uploaded run {wb_run.name}")
 
 
 if __name__ == "__main__":
