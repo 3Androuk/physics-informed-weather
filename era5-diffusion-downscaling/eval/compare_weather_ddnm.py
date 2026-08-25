@@ -1,12 +1,15 @@
 """T2M ablation for covariance-aware DDNM and coarse-informed initialization.
 
-The four arms use the same trained diffusion prior and the same initialization
-noise on every patch:
+The primary arms use the same trained diffusion prior and the same
+initialization noise on every patch:
 
-1. ordinary DDNM;
-2. ordinary DDNM with covariance lift ``K_C y`` at the first outer loop;
+1. guided diffusion without a projection;
+2. ordinary DDNM;
 3. spectral Weather-DDNM at every denoising step;
-4. spectral Weather-DDNM plus covariance lift.
+4. deterministic bicubic interpolation.
+
+By default, two additional initialization ablations compare ordinary and
+spectral DDNM with the covariance lift ``K_C y`` at the first outer loop.
 
 Run after estimating the covariance artifact::
 
@@ -32,7 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from data.degrade import coarsen, degrade  # noqa: E402
 from eval.metrics import l2_norm, radial_power_spectrum, spectrum_log_l1  # noqa: E402
-from sample.reconstruct import load_diffusion, reconstruct_diffusion  # noqa: E402
+from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
+                                reconstruct_diffusion)
 from sample.weather_ddnm import SpectralCovarianceProjector  # noqa: E402
 from utils import ensure_dir, get_device, load_config  # noqa: E402
 
@@ -54,13 +58,19 @@ def _reconstruct(diffusion, model, hf, coords, ratio, recon_cfg, projector,
                  arm, init_noise, batch, eta):
     """Run one arm, slicing the shared CPU noise to keep comparisons paired."""
     settings = {
-        "ddnm": {},
+        "no_projection": {"project": False},
+        "ddnm": {"project": True},
         "ddnm_cov_init": {
+            "project": True,
             "covariance_init": True,
             "covariance_init_projector": projector,
         },
-        "weather_ddnm": {"covariance_projector": projector},
+        "weather_ddnm": {
+            "project": True,
+            "covariance_projector": projector,
+        },
         "weather_ddnm_cov_init": {
+            "project": True,
             "covariance_projector": projector,
             "covariance_init": True,
         },
@@ -78,7 +88,7 @@ def _reconstruct(diffusion, model, hf, coords, ratio, recon_cfg, projector,
         noise = init_noise[:, start:stop].to(hf.device)
         output.append(reconstruct_diffusion(
             diffusion, model, hf[start:stop], ratio, recon_cfg,
-            eta=eta, coords=batch_coords, project=True, init_noise=noise,
+            eta=eta, coords=batch_coords, init_noise=noise,
             **settings,
         ).cpu())
     return torch.cat(output)
@@ -144,6 +154,9 @@ def main():
     parser.add_argument("--t0", type=int, default=None,
                         help="Use a single outer loop starting at this DDIM time.")
     parser.add_argument("--eta", type=float, default=None)
+    parser.add_argument("--primary-only", action="store_true",
+                        help="Compare no projection, ordinary DDNM, spectral "
+                             "Weather-DDNM, and bicubic; skip initialization ablations.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -191,7 +204,9 @@ def main():
     print(f"checkpoint={ckpt_path} | covariance={covariance_path} | patches={n} | "
           f"device={device}")
 
-    arms = ("ddnm", "ddnm_cov_init", "weather_ddnm", "weather_ddnm_cov_init")
+    arms = ["no_projection", "ddnm", "weather_ddnm"]
+    if not args.primary_only:
+        arms += ["ddnm_cov_init", "weather_ddnm_cov_init"]
     results = {}
     output_dir = ensure_dir(Path(cfg["paths"]["results_dir"]) / "weather_ddnm")
     seed = int(cfg["seed"] if args.seed is None else args.seed)
@@ -225,6 +240,18 @@ def main():
             print(f"  {ratio}x {arm:24s} | L2 {row[arm]['l2_kelvin']:.4f} K | "
                   f"spectrum {row[arm]['spectrum_log_l1']:.4f} | "
                   f"coarse {row[arm]['coarse_rmse_kelvin']:.3e} K")
+        bicubic = reconstruct_bicubic(hf, ratio).cpu()
+        predictions["bicubic"] = bicubic
+        bicubic_physical = normalizer.decode(bicubic)
+        row["bicubic"] = {
+            "l2_kelvin": l2_norm(bicubic_physical, hf_physical),
+            "spectrum_log_l1": spectrum_log_l1(bicubic_physical, hf_physical),
+            "coarse_rmse_kelvin": _coarse_rmse_kelvin(
+                bicubic, hf.cpu(), ratio, normalizer.std),
+        }
+        print(f"  {ratio}x {'bicubic':24s} | L2 {row['bicubic']['l2_kelvin']:.4f} K | "
+              f"spectrum {row['bicubic']['spectrum_log_l1']:.4f} | "
+              f"coarse {row['bicubic']['coarse_rmse_kelvin']:.3e} K")
         results[f"{ratio}x"] = row
         physical_predictions = {name: normalizer.decode(value)
                                 for name, value in predictions.items()}
@@ -236,6 +263,7 @@ def main():
     metadata = {
         "checkpoint": str(ckpt_path), "covariance": str(covariance_path),
         "seed": seed, "n_patches": n, "eta": eta, "t0_override": args.t0,
+        "primary_only": args.primary_only,
         "metrics": results,
     }
     with open(output_dir / "metrics.json", "w") as handle:

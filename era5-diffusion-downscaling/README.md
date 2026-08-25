@@ -68,18 +68,22 @@ outer DDIM loop from the covariance lift `K_C y` instead of nearest upsampling.
 Both changes preserve the observed block averages and require no retraining,
 physics gradients, or extra denoiser evaluations.
 
-Estimate the spectrum and run the paired four-arm ablation on the machine that
+Estimate the spectrum and run the paired primary comparison on the machine that
 holds the patches and diffusion checkpoint:
 
 ```bash
 python -m data.estimate_spectral_covariance --config config/t2m.yaml
-python -m eval.compare_weather_ddnm --config config/t2m.yaml --ckpt diffusion.pt
+python -m eval.compare_weather_ddnm --config config/t2m.yaml \
+  --ckpt diffusion.pt --primary-only
 # Optional single-start-time sweep:
 python -m eval.compare_weather_ddnm --config config/t2m.yaml --t0 160
 ```
 
-Outputs are written to `results_t2m/weather_ddnm/`. Every arm uses identical
-initial noise when `ddim_eta: 0`. For single-channel T2M, a scalar diagonal
+The primary comparison is unprojected guided diffusion, ordinary DDNM,
+spectral Weather-DDNM, and bicubic. Omit `--primary-only` to add covariance-lift
+initialization ablations for both DDNM projections. Outputs are written to
+`results_t2m/weather_ddnm/`. Every diffusion arm uses identical initial noise
+when `ddim_eta: 0`. For single-channel T2M, a scalar diagonal
 covariance is exactly ordinary DDNM because the variance scale cancels; the
 meaningful comparison is ordinary versus spatial/spectral covariance. The
 current covariance assumes periodic stationary 128x128 patches. Use
