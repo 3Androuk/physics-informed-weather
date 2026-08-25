@@ -29,7 +29,8 @@ from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
 from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
-                   geo_suffix, init_wandb, load_config, run_name, set_seed)
+                   figure_channels, geo_suffix, init_wandb, load_config,
+                   run_name, set_seed)
 
 
 def main():
@@ -391,17 +392,21 @@ def _save_samples(diffusion, model, normalizer, device, path, cfg, cond=None):
 
     size = cfg["patches"]["size"]
     channels = cfg["unet"]["out_channels"]
-    disp = display_channel(cfg)
-    disp_label = channel_labels(cfg["data"])[disp]
+    labels = channel_labels(cfg["data"])
+    chans = figure_channels(cfg)  # one figure row per selected channel
     samples = diffusion.sample_unconditional(model, (4, channels, size, size), device,
                                              n_steps=100, cond=cond)
     samples = normalizer.decode(samples.cpu()).numpy()
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    for ax, s in zip(axes, samples):
-        ax.imshow(s[disp], cmap="RdBu_r")
-        ax.axis("off")
+    fig, axes = plt.subplots(len(chans), 4, figsize=(16, 4 * len(chans)),
+                             squeeze=False)
+    for r, c in enumerate(chans):
+        for ax, s in zip(axes[r], samples):
+            ax.imshow(s[c], cmap="RdBu_r")
+            ax.axis("off")
+        axes[r][0].text(-0.06, 0.5, labels[c], transform=axes[r][0].transAxes,
+                        rotation=90, va="center", ha="center", fontsize=10)
     mode = "Geo-conditioned (fixed locations)" if cond is not None else "Unconditional"
-    fig.suptitle(f"{mode} diffusion samples ({disp_label})")
+    fig.suptitle(f"{mode} diffusion samples")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)

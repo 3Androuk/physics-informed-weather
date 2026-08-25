@@ -27,8 +27,8 @@ from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
-from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
-                   init_wandb, load_config, run_name, set_seed)
+from utils import (channel_labels, ensure_dir, figure_channels,  # noqa: E402
+                   geo_suffix, init_wandb, load_config, run_name, set_seed)
 
 
 def main():
@@ -254,8 +254,7 @@ def main():
             fig_path = ensure_dir(cfg["paths"]["results_dir"]) / f"directmap_epoch{epoch:03d}.png"
             _save_recons(fwd_eval, val_x[:2],
                          None if val_coords is None else val_coords[:2],
-                         normalizer, device, ratio, fig_path, raw_model,
-                         disp=display_channel(cfg))
+                         normalizer, device, ratio, fig_path, raw_model, cfg)
             import wandb as _wandb
             wb_run.log({"recons": _wandb.Image(str(fig_path))}, step=step)
 
@@ -279,10 +278,10 @@ def main():
 
 @torch.no_grad()
 def _save_recons(fwd, val_batch, val_coords, normalizer, device, ratio, path, model,
-                 disp=0):
+                 cfg):
     """Fixed val patches: input (train ratio), prediction at train ratio and at
-    8x, target — all on the target's color scale (display channel), comparable
-    across epochs."""
+    8x, target — one row per eval.figure_channels entry (default all channels)
+    on the target's per-channel color scale, comparable across epochs."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -300,16 +299,24 @@ def _save_recons(fwd, val_batch, val_coords, normalizer, device, ratio, path, mo
             ("Input (LF)", x4), (f"Pred {ratio}x", fwd(x4, ci)),
             ("Pred 8x", fwd(degrade(yi, 8), ci)), ("Target", yi),
         ])
-    fig, axes = plt.subplots(len(panels), 4, figsize=(16, 4 * len(panels)))
-    axes = axes.reshape(len(panels), 4)
-    for r, row in enumerate(panels):
-        ref = normalizer.decode(row[-1][1].cpu())[0, disp].numpy()
-        vmin, vmax = float(ref.min()), float(ref.max())
-        for ax, (title, t) in zip(axes[r], row):
-            ax.imshow(normalizer.decode(t.cpu())[0, disp].numpy(), cmap="RdBu_r",
-                      vmin=vmin, vmax=vmax)
-            ax.set_title(title)
-            ax.axis("off")
+    labels = channel_labels(cfg["data"])
+    chans = figure_channels(cfg)  # row block per patch: one row per channel
+    n_rows = len(panels) * len(chans)
+    fig, axes = plt.subplots(n_rows, 4, figsize=(16, 4 * n_rows), squeeze=False)
+    for p_i, row in enumerate(panels):
+        ref = normalizer.decode(row[-1][1].cpu())[0]
+        for c_i, c in enumerate(chans):
+            r = p_i * len(chans) + c_i
+            vmin, vmax = float(ref[c].min()), float(ref[c].max())
+            for ax, (title, t) in zip(axes[r], row):
+                ax.imshow(normalizer.decode(t.cpu())[0, c].numpy(), cmap="RdBu_r",
+                          vmin=vmin, vmax=vmax)
+                if r == 0:
+                    ax.set_title(title)
+                ax.axis("off")
+            axes[r][0].text(-0.06, 0.5, labels[c],
+                            transform=axes[r][0].transAxes, rotation=90,
+                            va="center", ha="center", fontsize=9)
     fig.suptitle("Direct-map reconstructions (fixed val patches)")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")

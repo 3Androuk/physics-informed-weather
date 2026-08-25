@@ -79,8 +79,35 @@ def channel_labels(dcfg: dict) -> list[str]:
 
 
 def display_channel(cfg: dict) -> int:
-    """Channel index used for figures and headline (physical-unit) metrics."""
+    """Channel index used for headline (physical-unit) metrics."""
     return int(cfg.get("eval", {}).get("display_channel", 0))
+
+
+def figure_channels(cfg: dict) -> list[int]:
+    """Channel indices rendered in qualitative/sample figures.
+
+    eval.figure_channels may list channel indices and/or short labels
+    (e.g. [t2m, z500, q850]); null/absent selects ALL channels, so
+    multi-variable runs are not silently reduced to the display channel.
+    Unknown labels and out-of-range indices raise — a typo must not silently
+    drop a row from every figure."""
+    labels = channel_labels(cfg["data"])
+    selection = cfg.get("eval", {}).get("figure_channels")
+    if selection is None:
+        return list(range(len(labels)))
+    idxs = []
+    for entry in selection:
+        if isinstance(entry, int):
+            if not 0 <= entry < len(labels):
+                raise ValueError(f"eval.figure_channels index {entry} out of "
+                                 f"range for {len(labels)} channel(s)")
+            idxs.append(entry)
+        elif entry in labels:
+            idxs.append(labels.index(entry))
+        else:
+            raise ValueError(f"eval.figure_channels entry {entry!r} is neither "
+                             f"a channel index nor one of {labels}")
+    return idxs
 
 
 # Checkpoint-name tag per geo encoder ("" for the default hash grid, so

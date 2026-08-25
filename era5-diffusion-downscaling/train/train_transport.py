@@ -24,8 +24,9 @@ from models.transport import build_transport, build_transport_model  # noqa: E40
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
-from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
-                   init_wandb, load_config, run_name, set_seed)
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   figure_channels, geo_suffix, init_wandb, load_config,
+                   run_name, set_seed)
 
 
 def _parser(method: str):
@@ -417,17 +418,26 @@ def _save_samples(process, model, subset, normalizer, device, geo_on,
         panels.append(row)
 
     disp = display_channel(cfg)
-    fig, axes = plt.subplots(len(panels), len(panels[0]),
-                             figsize=(4 * len(panels[0]), 4 * len(panels)))
-    axes = axes.reshape(len(panels), len(panels[0]))
+    labels = channel_labels(cfg["data"])
+    chans = figure_channels(cfg)  # row block per patch: one row per channel
+    n_rows = len(panels) * len(chans)
+    fig, axes = plt.subplots(n_rows, len(panels[0]),
+                             figsize=(4 * len(panels[0]), 4 * n_rows),
+                             squeeze=False)
     for row_idx, row in enumerate(panels):
-        ref = normalizer.decode(row[-1][1].cpu())[0, disp].numpy()
-        vmin, vmax = float(ref.min()), float(ref.max())
-        for ax, (title, tensor) in zip(axes[row_idx], row):
-            ax.imshow(normalizer.decode(tensor.cpu())[0, disp].numpy(),
-                      cmap="RdBu_r", vmin=vmin, vmax=vmax)
-            ax.set_title(title)
-            ax.axis("off")
+        ref = normalizer.decode(row[-1][1].cpu())[0]
+        for c_i, c in enumerate(chans):
+            r = row_idx * len(chans) + c_i
+            vmin, vmax = float(ref[c].min()), float(ref[c].max())
+            for ax, (title, tensor) in zip(axes[r], row):
+                ax.imshow(normalizer.decode(tensor.cpu())[0, c].numpy(),
+                          cmap="RdBu_r", vmin=vmin, vmax=vmax)
+                if r == 0:
+                    ax.set_title(title)
+                ax.axis("off")
+            axes[r][0].text(-0.06, 0.5, labels[c],
+                            transform=axes[r][0].transAxes, rotation=90,
+                            va="center", ha="center", fontsize=9)
     fig.suptitle(f"{method.replace('_', ' ').title()} super-resolution")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")

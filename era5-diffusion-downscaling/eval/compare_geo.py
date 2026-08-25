@@ -10,6 +10,12 @@ bicubic. Reports L2 (RMSE) and the power-spectrum metric; optional per-step
 DDNM projection, --shuffle-geo permutation control, and ensemble metrics
 (ensemble-mean L2, CRPS, spread).
 
+Multi-channel configs (e.g. wb2_20var): headline L2/spectrum are the
+eval.display_channel in physical units — physical units mix across variables,
+so the JSON additionally carries an all-channel L2 in NORMALIZED units and a
+per-channel physical breakdown (same convention as eval.make_tables_figures).
+Figures render one row per eval.figure_channels entry (default: all channels).
+
 Run (ladder):
     python -m eval.compare_geo --config config/t2m.yaml --wandb \
         --ckpts diffusion.pt diffusion_geo.pt diffusion_geo_hpx.pt \
@@ -36,7 +42,9 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from eval.metrics import radial_power_spectrum, spectrum_log_l1, l2_norm  # noqa: E402
 from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
                                 reconstruct_diffusion)
-from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # noqa: E402
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   figure_channels, get_device, init_wandb, load_config,
+                   run_name)
 
 
 def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
@@ -156,7 +164,17 @@ def main():
     hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
 
-    table, spectra = {}, {"Reference": radial_power_spectrum(hf_phys)}
+    # Headline metrics live on the display channel: physical units mix across
+    # variables (Pa vs K vs kg/kg), so an all-channel physical L2 would just be
+    # a pressure/geopotential score. Multi-channel runs additionally get an
+    # all-channel L2 in NORMALIZED units + per-channel physical breakdown.
+    ch = display_channel(cfg)
+    labels = channel_labels(cfg["data"])
+    multi = len(labels) > 1
+    fig_chans = figure_channels(cfg)
+    hf_disp = hf_phys[:, ch:ch + 1]
+
+    table, spectra = {}, {"Reference": radial_power_spectrum(hf_disp)}
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]; tag = f"{ratio}x"
         preds = {disp: _recon(dif, mod, hf, ratio, rc, eta, coords, args.batch,
@@ -168,20 +186,31 @@ def main():
         row = {}
         for name, p in preds.items():
             pp = normalizer.decode(p)
-            row[name] = {"l2": l2_norm(pp, hf_phys), "spectrum_log_l1": spectrum_log_l1(pp, hf_phys)}
-            spectra[f"{name} {tag}"] = radial_power_spectrum(pp)
-            print(f"  {tag} {name:28s} | L2 {row[name]['l2']:.4f} | "
-                  f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
+            pd = pp[:, ch:ch + 1]
+            row[name] = {"l2": l2_norm(pd, hf_disp),
+                         "spectrum_log_l1": spectrum_log_l1(pd, hf_disp)}
+            extra = ""
+            if multi:
+                row[name]["l2_all_norm"] = l2_norm(p, hf.cpu())
+                row[name]["per_channel"] = {
+                    lab: l2_norm(pp[:, c:c + 1], hf_phys[:, c:c + 1])
+                    for c, lab in enumerate(labels)}
+                extra = f" | L2-all(norm) {row[name]['l2_all_norm']:.4f}"
+            spectra[f"{name} {tag}"] = radial_power_spectrum(pd)
+            print(f"  {tag} {name:28s} | L2[{labels[ch]}] {row[name]['l2']:.4f} | "
+                  f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}{extra}")
         table[tag] = row
         _qualitative(normalizer, hf, preds, ratio, rc,
-                     results_dir / f"{stem}_qualitative_{tag}.png")
+                     results_dir / f"{stem}_qualitative_{tag}.png",
+                     fig_chans, labels)
 
     # ── Ensemble metrics (subset of patches; diffusion methods only) ──────
     if args.ensemble > 1:
         from eval.metrics import crps_ensemble
         n_e = min(args.ensemble_patches, len(hf))
-        hf_e, hf_e_phys = hf[:n_e], hf_phys[:n_e]
-        print(f"\nEnsemble metrics: {args.ensemble} members x {n_e} patches")
+        hf_e, hf_e_phys = hf[:n_e], hf_disp[:n_e]  # scored on the display channel
+        print(f"\nEnsemble metrics: {args.ensemble} members x {n_e} patches "
+              f"({labels[ch]})")
         ens = {}
         for rc in cfg["sample"]["reconstructions"]:
             ratio = rc["ratio"]; tag = f"{ratio}x"
@@ -190,7 +219,7 @@ def main():
                 members = [normalizer.decode(
                     _recon(dif, mod, hf_e, ratio, rc, eta, c, args.batch,
                            label=f"{tag} {disp} member {m + 1}/{args.ensemble}",
-                           project=args.project))
+                           project=args.project))[:, ch:ch + 1]
                     for m in range(args.ensemble)]
                 stack = torch.stack(members)
                 row = {
@@ -239,6 +268,8 @@ def main():
                 tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
                 wb_run.summary[f"{tag}/{method}/l2"] = v["l2"]
                 wb_run.summary[f"{tag}/{method}/spectrum_log_l1"] = v["spectrum_log_l1"]
+                if "l2_all_norm" in v:
+                    wb_run.summary[f"{tag}/{method}/l2_all_norm"] = v["l2_all_norm"]
         log["ablation/table"] = tbl
         log["ablation/spectrum"] = wandb.Image(str(results_dir / f"{stem}_spectrum.png"))
         for rc in cfg["sample"]["reconstructions"]:
@@ -254,23 +285,32 @@ def main():
         print("wandb: ablation run logged")
 
 
-def _qualitative(normalizer, hf, preds, ratio, rc, path, idx=0):
-    """Side-by-side panels on a SHARED color scale (taken from the reference),
-    so residual noise or bias shows as a visible difference instead of being
-    hidden by per-panel autoscaling. Also writes one small Input|model|Reference
-    figure PER model next to the combined panel."""
+def _qualitative(normalizer, hf, preds, ratio, rc, path, chans, labels, idx=0):
+    """Side-by-side panels on a SHARED per-channel color scale (taken from the
+    reference), so residual noise or bias shows as a visible difference instead
+    of being hidden by per-panel autoscaling. One row per figure channel
+    (eval.figure_channels; default all channels), one column per model. Also
+    writes one small Input|model|Reference figure PER model next to the
+    combined panel."""
     from data.degrade import degrade
     lf = degrade(hf[idx:idx + 1].cpu(), ratio, rc.get("smooth_sigma", 0.0))
-    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0, 0].numpy()
-    vmin, vmax = float(ref.min()), float(ref.max())
+    ref = normalizer.decode(hf[idx:idx + 1].cpu())[0]
 
     def _panel_fig(panels, out_path, suptitle):
-        fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4.2))
-        for ax, (title, t) in zip(np.atleast_1d(axes), panels):
-            ax.imshow(normalizer.decode(t.cpu())[0, 0].numpy(), cmap="RdBu_r",
-                      vmin=vmin, vmax=vmax)
-            ax.set_title(title, fontsize=9)
-            ax.axis("off")
+        fig, axes = plt.subplots(len(chans), len(panels),
+                                 figsize=(4.2 * len(panels), 4.2 * len(chans)),
+                                 squeeze=False)
+        for r, c in enumerate(chans):
+            vmin, vmax = float(ref[c].min()), float(ref[c].max())
+            for ax, (title, t) in zip(axes[r], panels):
+                ax.imshow(normalizer.decode(t.cpu())[0, c].numpy(), cmap="RdBu_r",
+                          vmin=vmin, vmax=vmax)
+                if r == 0:
+                    ax.set_title(title, fontsize=9)
+                ax.axis("off")
+            axes[r][0].text(-0.06, 0.5, labels[c],
+                            transform=axes[r][0].transAxes, rotation=90,
+                            va="center", ha="center", fontsize=9)
         fig.suptitle(suptitle)
         fig.tight_layout()
         fig.savefig(out_path, dpi=130, bbox_inches="tight")

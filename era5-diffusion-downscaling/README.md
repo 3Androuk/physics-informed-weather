@@ -180,9 +180,13 @@ for figures and the headline physical-unit metrics
   `unet.in_channels`/`out_channels` must match its length.
 - Downloaded fields, patches and models are all `(…, C, H, W)`; normalization
   is per-channel z-score.
-- Evaluation reports the display channel in physical units (as before), plus
-  an all-channel L2 in normalized units and a per-channel breakdown in the
-  JSON outputs.
+- Evaluation (`eval.make_tables_figures` and `eval.compare_geo`) reports the
+  display channel in physical units (as before), plus an all-channel L2 in
+  normalized units and a per-channel breakdown in the JSON outputs.
+- Qualitative/sample figures (eval scripts and the trainers' periodic panels)
+  render one row per channel in `eval.figure_channels` — indices or labels,
+  `null`/omitted meaning **all** channels; list a subset (e.g.
+  `[t2m, z500, q850]`) to keep figures small.
 - Single-variable configs (`t2m.yaml`, `z500.yaml`, `default.yaml`) are
   unchanged and keep working; they are just the C=1 case.
 

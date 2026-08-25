@@ -154,7 +154,11 @@ sample:
 
 eval:
   n_test_patches: 256
-  display_channel: 0             # t2m: figures + headline physical-unit metrics
+  display_channel: 0             # t2m: headline physical-unit metrics
+  # Channels rendered in qualitative/sample figures — indices or labels
+  # (e.g. [t2m, z500, q850]). null -> ALL 20 channels (tall figures);
+  # list a subset to shrink them.
+  figure_channels: null
   spectrum_bins: null
   hist_bins: 100
 

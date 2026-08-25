@@ -33,8 +33,9 @@ from models.residual import build_residual_model  # noqa: E402
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
-from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
-                   init_wandb, load_config, run_name, set_seed)
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   figure_channels, geo_suffix, init_wandb, load_config,
+                   run_name, set_seed)
 
 
 def _bicubic_mean(y: torch.Tensor, ratio: int) -> torch.Tensor:
@@ -295,7 +296,7 @@ def main():
             fig_path = results_dir / f"residual_epoch{epoch:03d}.png"
             spec = _save_recons(diffusion, ema.shadow, val_loader.dataset, normalizer,
                                 device, res_std, rcfg.get("n_steps", 100), need_coords,
-                                mean_fn, fig_path, disp=display_channel(cfg))
+                                mean_fn, fig_path, cfg)
             if wb_run is not None:
                 log = {"recons": wandb.Image(str(fig_path))}
                 if spec is not None:
@@ -361,10 +362,11 @@ def _val_loss(diffusion, model, val_loader, device, ratio, res_std, need_coords,
 
 @torch.no_grad()
 def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
-                 n_steps, need_coords, mean_fn, path, disp=0):
+                 n_steps, need_coords, mean_fn, path, cfg):
     """2 fixed val patches reconstructed at 4x and 8x: mean | mean+residual |
-    target, shared color scale (display channel). Returns spectrum_log_l1 of
-    the recons vs targets (both ratios pooled, display channel) or None."""
+    target, one row per eval.figure_channels entry (default all channels) on a
+    shared per-channel color scale. Returns spectrum_log_l1 of the recons vs
+    targets (both ratios pooled, display channel) or None."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -392,16 +394,25 @@ def _save_recons(diffusion, model, val_subset, normalizer, device, res_std,
         row.append(("Target", yi))
         panels.append(row)
 
-    fig, axes = plt.subplots(len(panels), 5, figsize=(20, 4 * len(panels)))
-    axes = axes.reshape(len(panels), 5)
+    disp = display_channel(cfg)
+    labels = channel_labels(cfg["data"])
+    chans = figure_channels(cfg)  # row block per patch: one row per channel
+    n_rows = len(panels) * len(chans)
+    fig, axes = plt.subplots(n_rows, 5, figsize=(20, 4 * n_rows), squeeze=False)
     for r_i, row in enumerate(panels):
-        ref = normalizer.decode(row[-1][1].cpu())[0, disp].numpy()
-        vmin, vmax = float(ref.min()), float(ref.max())
-        for ax, (title, t) in zip(axes[r_i], row):
-            ax.imshow(normalizer.decode(t.cpu())[0, disp].numpy(), cmap="RdBu_r",
-                      vmin=vmin, vmax=vmax)
-            ax.set_title(title)
-            ax.axis("off")
+        ref = normalizer.decode(row[-1][1].cpu())[0]
+        for c_i, c in enumerate(chans):
+            r = r_i * len(chans) + c_i
+            vmin, vmax = float(ref[c].min()), float(ref[c].max())
+            for ax, (title, t) in zip(axes[r], row):
+                ax.imshow(normalizer.decode(t.cpu())[0, c].numpy(), cmap="RdBu_r",
+                          vmin=vmin, vmax=vmax)
+                if r == 0:
+                    ax.set_title(title)
+                ax.axis("off")
+            axes[r][0].text(-0.06, 0.5, labels[c],
+                            transform=axes[r][0].transAxes, rotation=90,
+                            va="center", ha="center", fontsize=9)
     fig.suptitle("Residual model reconstructions (fixed val patches)")
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
