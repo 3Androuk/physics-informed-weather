@@ -58,7 +58,10 @@ head-to-head against its diffusion / direct-map / bicubic models trained on
 the same fields (remap predictions to the lat-lon grid with
 `hpx.remap.hpx_to_latlon` and score with that project's metrics on its ±60°
 test patches). One sample is the whole globe; `grad_checkpoint: true` makes
-batch 2 fit in 8 GB. Transfer ~17 GB streamed, ~13 GB on disk — the full
+batch 2 fit in 8 GB, and `train.accum_steps` accumulates gradients over
+several micro-batches for a larger effective batch in the same memory
+(e.g. `batch_size: 2` + `accum_steps: 4` = effective batch 8 on a 24 GB
+card, where batch 4+ in a single pass OOMs at fp32). Transfer ~17 GB streamed, ~13 GB on disk — the full
 globe is needed because the mesh includes the poles, so a ±60°-band cache
 from the sibling downloader can't be reused directly.
 

@@ -48,6 +48,12 @@ model:
 train:
   batch_size: 2                  # one sample = the whole globe (12x256x256);
                                  # 2 fits 8GB with grad_checkpoint, raise on bigger GPUs
+  accum_steps: 1                 # micro-batches accumulated per optimizer step;
+                                 # effective batch = batch_size * accum_steps.
+                                 # 24GB cards: batch_size 2 + accum_steps 4 gives
+                                 # effective batch 8 in batch-2 memory (batch 4+
+                                 # in one pass OOMs — the level-1 expansion MLP
+                                 # peaks ~4GB per sample at fp32)
   epochs: 50
   lr: 2.0e-4
   weight_decay: 1.0e-5

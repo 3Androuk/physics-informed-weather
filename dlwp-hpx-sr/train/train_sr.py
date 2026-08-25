@@ -81,9 +81,11 @@ def main():
         num_workers=0, pin_memory=True,
     )
 
+    accum = max(1, int(tc.get("accum_steps", 1)))
     model = build_model(cfg).to(device)
     print(f"DLWP-HPX SR | nside {cfg['hpx']['nside']} | ratio {ratio}x | "
-          f"train {len(train_ds)} val {n_val} | params {count_params(model):,}")
+          f"train {len(train_ds)} val {n_val} | params {count_params(model):,} | "
+          f"batch {tc['batch_size']}x{accum} (effective {tc['batch_size'] * accum})")
 
     wb_run, _ = init_wandb(cfg, job_type="train_sr", extra_config={
         "n_train": len(train_ds), "n_val": n_val,
@@ -100,31 +102,34 @@ def main():
     loss_fn = torch.nn.MSELoss()
 
     best_val = float("inf")
-    step = 0
+    step = 0  # micro-batches; the optimizer steps once every `accum` of them
     # Loss accumulator persists across epoch boundaries (see sibling project):
-    # batches/epoch is rarely a multiple of log_every.
+    # batches/epoch is rarely a multiple of log_every. The gradient window may
+    # span an epoch boundary too when batches/epoch % accum != 0 — harmless.
     running, running_n = 0.0, 0
     t0 = time.time()
+    opt.zero_grad(set_to_none=True)
     for epoch in range(1, tc["epochs"] + 1):
         model.train()
         for y in loader:  # y: normalized HR faces (B, 12, 1, F, F)
             y = y.to(device, non_blocking=True)
             x = degrade_faces(y, ratio)  # LR input on the HR grid
-            opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss = loss_fn(model(x), y)
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at step {step}; aborting "
                                    "instead of training garbage")
-            scaler.scale(loss).backward()
-            if tc["grad_clip"] > 0:
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), tc["grad_clip"])
-            scaler.step(opt)
-            scaler.update()
+            scaler.scale(loss / accum).backward()
+            step += 1
+            if step % accum == 0:
+                if tc["grad_clip"] > 0:
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), tc["grad_clip"])
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             running += loss.item()
             running_n += 1
-            step += 1
             if step % tc["log_every"] == 0:
                 avg = running / running_n
                 print(f"epoch {epoch:03d} step {step:07d} | mse {avg:.5f} | "
