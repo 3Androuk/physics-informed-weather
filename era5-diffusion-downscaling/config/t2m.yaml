@@ -140,6 +140,17 @@ sample:
       t_steps: [320]
       smooth_sigma: 5.0
 
+# Inference-only Weather-DDNM. Estimate this artifact once from normalized HR
+# training patches, then compare ordinary and covariance-aware projections with
+# the existing diffusion checkpoint (no retraining or physics gradients).
+weather_ddnm:
+  covariance_file: spectral_covariance.npz
+  max_patches: 8192
+  spectrum: isotropic              # isotropic or directional
+  shrinkage: 0.02                  # shrink empirical power toward white noise
+  relative_floor: 1.0e-4           # positive floor relative to mean power
+  inverse_floor: 1.0e-7            # numerical floor for (A C A^T)^-1
+
 eval:
   n_test_patches: 256
   spectrum_bins: null

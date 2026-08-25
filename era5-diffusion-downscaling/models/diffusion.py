@@ -91,6 +91,9 @@ class GaussianDiffusion(nn.Module):
         lf: torch.Tensor = None,
         ratio: int = None,
         init_noise: torch.Tensor = None,
+        covariance_projector=None,
+        covariance_init: bool = False,
+        covariance_init_projector=None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -106,6 +109,14 @@ class GaussianDiffusion(nn.Module):
         block averages are pinned to the observed input (ILVR-style data
         consistency). Without it the input is consulted only once, at the
         noise-mixing initialization, and the chain is free to drift.
+
+        If ``covariance_projector`` is supplied, the per-step projection uses
+        ``C A^T (A C A^T)^-1`` instead of the ordinary pixel-space
+        pseudoinverse. ``covariance_init`` replaces the first loop's
+        nearest-upsampled guidance with ``K_C lf``; it may use a separate
+        ``covariance_init_projector`` so covariance initialization can be
+        ablated with ordinary per-step DDNM. All are inference-only and make no
+        extra denoiser calls.
 
         Args:
             model: trained noise predictor eps_theta(x_t, t).
@@ -127,10 +138,14 @@ class GaussianDiffusion(nn.Module):
             assert init_noise.shape == (K, *x_guidance.shape), (
                 f"init_noise must be (K, *x.shape) = {(K, *x_guidance.shape)}, "
                 f"got {tuple(init_noise.shape)}")
-        if project:
-            assert lf is not None and ratio is not None, "project=True needs lf and ratio"
+        if project or covariance_init:
+            assert lf is not None and ratio is not None, (
+                "projection/covariance initialization needs lf and ratio")
             from data.degrade import coarsen, upsample_nearest
             hw = x_guidance.shape[-2:]
+        init_projector = covariance_init_projector or covariance_projector
+        if covariance_init and init_projector is None:
+            raise ValueError("covariance_init=True needs a covariance projector")
         x_g = x_guidance
         device = x_guidance.device
         iterator = range(K)
@@ -144,6 +159,11 @@ class GaussianDiffusion(nn.Module):
             seq = list(range(0, t0 + 1, stride))
             if seq[-1] != t0:
                 seq.append(t0)
+
+            # Weather-aware coarse initialization is applied only to the first
+            # outer loop. Later loops recursively use the previous reconstruction.
+            if k == 0 and covariance_init:
+                x_g = init_projector.lift(lf, ratio)
 
             # Noise mixing + intermediate start: x_t = sqrt(abar_t) x_g + sqrt(1-abar_t) eps.
             eps = (torch.randn_like(x_g) if init_noise is None
@@ -162,7 +182,11 @@ class GaussianDiffusion(nn.Module):
 
                 x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
                 if project:
-                    x0_pred = x0_pred + upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
+                    if covariance_projector is None:
+                        x0_pred = x0_pred + upsample_nearest(
+                            lf - coarsen(x0_pred, ratio), hw)
+                    else:
+                        x0_pred = covariance_projector.project(x0_pred, lf, ratio)
                 sigma = eta * (
                     ((1 - a_prev) / (1 - a_i)).clamp(min=0).sqrt()
                     * (1 - a_i / a_prev).clamp(min=0).sqrt()

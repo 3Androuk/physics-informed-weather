@@ -57,6 +57,35 @@ Both samplers optionally apply an exact final block-average projection so the
 generated field coarsens back to the observed input. The default training ratios
 are `{2, 4, 8}` and the default evaluation also includes held-out `16×`.
 
+## Weather-covariance-aware DDNM (T2M)
+
+The guided diffusion sampler also supports an inference-only Weather-DDNM
+projection. It replaces the ordinary pixel-space correction with
+`C A^T (A C A^T)^-1`, where `C` is a stationary T2M covariance estimated from
+the normalized high-resolution training patches. The implementation uses FFTs
+and never forms a dense covariance matrix. It can also initialize the first
+outer DDIM loop from the covariance lift `K_C y` instead of nearest upsampling.
+Both changes preserve the observed block averages and require no retraining,
+physics gradients, or extra denoiser evaluations.
+
+Estimate the spectrum and run the paired four-arm ablation on the machine that
+holds the patches and diffusion checkpoint:
+
+```bash
+python -m data.estimate_spectral_covariance --config config/t2m.yaml
+python -m eval.compare_weather_ddnm --config config/t2m.yaml --ckpt diffusion.pt
+# Optional single-start-time sweep:
+python -m eval.compare_weather_ddnm --config config/t2m.yaml --t0 160
+```
+
+Outputs are written to `results_t2m/weather_ddnm/`. Every arm uses identical
+initial noise when `ddim_eta: 0`. For single-channel T2M, a scalar diagonal
+covariance is exactly ordinary DDNM because the variance scale cancels; the
+meaningful comparison is ordinary versus spatial/spectral covariance. The
+current covariance assumes periodic stationary 128x128 patches. Use
+`--directional` during estimation to preserve anisotropy rather than radially
+averaging the spectrum.
+
 ### Geographic conditioning: learned embeddings vs baselines
 
 The learned location tables (`--encoder hash|healpix`) are compared against a

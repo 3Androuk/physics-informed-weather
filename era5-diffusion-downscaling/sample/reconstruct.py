@@ -101,19 +101,27 @@ def load_directmap(ckpt_path, device):
 
 @torch.no_grad()
 def reconstruct_diffusion(diffusion, model, hf_norm, ratio, recon_cfg,
-                          eta=0.0, progress=False, coords=None, project=False):
+                          eta=0.0, progress=False, coords=None, project=False,
+                          covariance_projector=None, covariance_init=False,
+                          covariance_init_projector=None, init_noise=None):
     """Guided diffusion reconstruction of `hf_norm` degraded at `ratio`.
 
     `coords` (B,H,W,d) is required for a geo-conditioned model and ignored
     otherwise. With project=True the sampler enforces coarsen(x0) == LF at
     every step (data consistency); the LF observation is the same coarse field
-    the guidance is built from.
+    the guidance is built from. ``covariance_projector`` replaces the ordinary
+    projection; ``covariance_init`` starts the first outer loop from ``K_C y``.
+    ``init_noise`` allows paired ablations or consistent overlapping tiles.
     """
     x_g = degrade(hf_norm, ratio, smooth_sigma=recon_cfg.get("smooth_sigma", 0.0))
-    lf = coarsen(hf_norm, ratio) if project else None
+    lf = coarsen(hf_norm, ratio) if (project or covariance_init) else None
     return diffusion.guided_reconstruct(
         model, x_g, t_steps=recon_cfg["t_steps"], K=recon_cfg["K"], eta=eta,
         progress=progress, cond=coords, project=project, lf=lf, ratio=ratio,
+        covariance_projector=covariance_projector,
+        covariance_init=covariance_init,
+        covariance_init_projector=covariance_init_projector,
+        init_noise=init_noise,
     )
 
 
