@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.utils.checkpoint  # not auto-imported by `import torch` on all versions
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
