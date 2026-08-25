@@ -55,10 +55,17 @@ def main():
         if not path.exists():
             print(f"[skip] {label}: checkpoint not found at {path}")
             continue
-        model, process, model_cfg, method = load_transport(path, device)
+        model, process, model_cfg, method, residual = load_transport(path, device)
         _validate_compatible(cfg, model_cfg, label)
         coords = _payload(patch_dir, normalizer, n, model_cfg, device)
-        loaded.append((label, model, process, model_cfg, method, coords))
+        if residual is not None:
+            label += " (residual)"
+            # A geo-conditioned mean needs coords even when the transport model
+            # itself is not: build them from the mean's own geo config.
+            if coords is None and residual["mean_geo"]:
+                coords = _payload(patch_dir, normalizer, n,
+                                  {"geo": residual["mean_geo_cfg"]}, device)
+        loaded.append((label, model, process, model_cfg, method, coords, residual))
     if not loaded:
         raise FileNotFoundError("no transport checkpoints found")
 
@@ -67,9 +74,10 @@ def main():
     spectra = {"Reference": radial_power_spectrum(hf_phys)}
     for ratio in ratios:
         preds = {"Bicubic": _batched_bicubic(hf, ratio, args.batch)}
-        for label, model, process, model_cfg, method, coords in loaded:
+        for label, model, process, model_cfg, method, coords, residual in loaded:
             preds[label] = _batched_transport(
-                hf, coords, args.batch, model, process, ratio, model_cfg, method, args)
+                hf, coords, args.batch, model, process, ratio, model_cfg, method,
+                args, residual)
         row = {}
         for label, pred in preds.items():
             physical = normalizer.decode(pred)
@@ -100,6 +108,8 @@ def _payload(patch_dir, normalizer, n, cfg, device):
         coords_full_path=patch_dir / "coords_full.npz",
         geo_input_dim=g["input_dim"], altitude=g.get("altitude"),
         geo_encoder=g.get("encoder", "hash"),
+        healpix_index_path=((patch_dir / g["healpix_index"])
+                            if g.get("healpix_index") else None),
     )
     return torch.stack([ds[i][1] for i in range(n)]).to(device)
 
@@ -117,7 +127,8 @@ def _batched_bicubic(hf, ratio, batch):
     ])
 
 
-def _batched_transport(hf, coords, batch, model, process, ratio, cfg, method, args):
+def _batched_transport(hf, coords, batch, model, process, ratio, cfg, method,
+                       args, residual=None):
     outputs = []
     for i in range(0, len(hf), batch):
         c = None if coords is None else coords[i:i + batch]
@@ -125,6 +136,7 @@ def _batched_transport(hf, coords, batch, model, process, ratio, cfg, method, ar
             model, process, hf[i:i + batch], ratio, cfg, method, coords=c,
             steps=args.steps, solver=args.solver, sampler=args.si_sampler,
             stochasticity=args.stochasticity, projection=args.projection,
+            residual=residual,
         ).cpu())
     return torch.cat(outputs)
 

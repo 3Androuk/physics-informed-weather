@@ -27,8 +27,8 @@ from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.residual import build_residual_model  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (ensure_dir, geo_suffix, get_device, init_wandb,  # noqa: E402
+                   load_config, run_name, set_seed)
 
 
 def _bicubic_mean(y: torch.Tensor, ratio: int) -> torch.Tensor:
@@ -49,9 +49,12 @@ def main():
                          "embedding as well.")
     ap.add_argument("--seed", type=int, default=None,
                     help="Override config seed; suffixes the checkpoint name.")
-    ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
+    ap.add_argument("--gated", action="store_true",
+                    help="Force geo.level_gating: true — noise-dependent gating "
+                         "of the embedding levels; checkpoint gains _gated.")
     ap.add_argument("--mean-ckpt", default=None,
                     help="Checkpoint name (in paths.ckpt_dir) of a frozen learned "
                          "regression mean (train_directmap --random-ratio -> "
@@ -65,6 +68,8 @@ def main():
         cfg.setdefault("geo", {})["enabled"] = True
     if args.encoder is not None:
         cfg.setdefault("geo", {})["encoder"] = args.encoder
+    if args.gated:
+        cfg.setdefault("geo", {})["level_gating"] = True
     if args.seed is not None:
         cfg["seed"] = args.seed
     set_seed(cfg["seed"])
@@ -79,9 +84,8 @@ def main():
 
     geo_on = cfg.get("geo", {}).get("enabled", False)
     seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
-    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
     lm = "_lm" if args.mean_ckpt else ""
-    ckpt_name = f"residual{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{lm}{seed_suffix}.pt"
+    ckpt_name = f"residual{geo_suffix(cfg)}{lm}{seed_suffix}.pt"
 
     # ── The deterministic mean: bicubic (Phase A) or a frozen learned
     # regression (Phase B, --mean-ckpt). The mean may be geo-conditioned even
@@ -117,7 +121,9 @@ def main():
         gkw = dict(origins_path=patch_dir / "train_origins.npy",
                    coords_full_path=patch_dir / "coords_full.npz",
                    geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
-                   geo_encoder=gcfg.get("encoder", "hash"))
+                   geo_encoder=gcfg.get("encoder", "hash"),
+                   healpix_index_path=((patch_dir / gcfg["healpix_index"])
+                                       if gcfg.get("healpix_index") else None))
     ds = PatchDataset(patch_dir / "train_patches.npy", normalizer, **gkw)
     loader = DataLoader(
         ds, batch_size=tc["batch_size"], shuffle=True,

@@ -90,8 +90,15 @@ class GaussianDiffusion(nn.Module):
         project: bool = False,
         lf: torch.Tensor = None,
         ratio: int = None,
+        init_noise: torch.Tensor = None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
+
+        `init_noise` (optional, (K, *x_guidance.shape)) supplies the noise-mixing
+        epsilon of each outer loop instead of drawing it — used by tiled
+        full-field reconstruction, where overlapping tiles crop their epsilons
+        from one global noise field so they agree where they overlap. With
+        eta = 0 the chain is otherwise deterministic.
 
         With project=True (requires `lf`, the (N,1,h,w) coarse observation, and
         `ratio`), every step's x0 estimate is projected onto the constraint
@@ -116,6 +123,10 @@ class GaussianDiffusion(nn.Module):
             (N, 1, H, W) reconstructed field (normalized units).
         """
         assert len(t_steps) == K, "t_steps must have one entry per outer loop K"
+        if init_noise is not None:
+            assert init_noise.shape == (K, *x_guidance.shape), (
+                f"init_noise must be (K, *x.shape) = {(K, *x_guidance.shape)}, "
+                f"got {tuple(init_noise.shape)}")
         if project:
             assert lf is not None and ratio is not None, "project=True needs lf and ratio"
             from data.degrade import coarsen, upsample_nearest
@@ -135,7 +146,8 @@ class GaussianDiffusion(nn.Module):
                 seq.append(t0)
 
             # Noise mixing + intermediate start: x_t = sqrt(abar_t) x_g + sqrt(1-abar_t) eps.
-            eps = torch.randn_like(x_g)
+            eps = (torch.randn_like(x_g) if init_noise is None
+                   else init_noise[k].to(device=x_g.device, dtype=x_g.dtype))
             sa = self.sqrt_abar[t0]
             som = self.sqrt_one_minus_abar[t0]
             x = sa * x_g + som * eps

@@ -1,3 +1,17 @@
+# LADDER-MATCHED HEALPix experiment (see PROJECT_CONTEXT diagnosis 2026-08-14).
+# The original healpix run used Nside 1..128: three levels at/above the 32-deg
+# patch span (dead weight) and a 0.458-deg finest level that violates the
+# ~150 km cap this file itself establishes for the hash. This config gives
+# HEALPix the SAME scale band and density as the hash (7.3->0.92 deg, b~1.35)
+# via a ring-scheme integer ladder: 8,11,14,20,26,35,48,64. ~219k dense params.
+# Precompute: python -m data.make_healpix_index --config config/t2m_hpxm.yaml
+# Train:      python -m train.train_diffusion --config config/t2m_hpxm.yaml --wandb --geo
+#             No --seed flag: config seed 42 already matches the originals' RNG,
+#             and like them the checkpoint carries no seed suffix. It trains in
+#             THIS checkout as diffusion_geo_hpx.pt; the original Nside-1..128
+#             model is symlinked alongside as diffusion_geo_hpx_n128.pt so the
+#             head-to-head eval can address both.
+
 # 2m temperature variant — surface variable with strong geographic imprint
 # (orography via lapse rate, land-sea contrast), the fair test for the
 # geo-conditioning hypothesis. All paths are separate from the Z500 runs so
@@ -64,7 +78,7 @@ unet:
 # overfit train-year anomalies (val loss got worse while fine-level table
 # weights grew large). Static geography is smooth — cap the cells at ~150 km.
 geo:
-  enabled: false                   # train the baseline first, then set true
+  enabled: true
   # Learned encoders: "hash" (Instant-NGP cube grid, default) or "healpix"
   # (dense equal-area spherical pyramid — no hash collisions; precompute once:
   # python -m data.make_healpix_index --config config/t2m.yaml).
@@ -73,14 +87,16 @@ geo:
   #   "sinusoidal" fixed multiscale Fourier basis of the coordinates
   #   "static"     real physiographic fields (orography, land-sea mask, ...);
   #                precompute once: python -m data.make_static_fields --config ...
-  encoder: hash
+  encoder: healpix
   sinusoidal_n_frequencies: 3      # sinusoidal: output_dim = input_dim * 2 * n
   static_fields:                   # static: WB2 zarr variables, in channel order
     - geopotential_at_surface
     - land_sea_mask
     - slope_of_sub_gridscale_orography
   healpix_n_levels: 8
-  healpix_nside_max: 128           # finest HEALPix level (~0.46 deg cells)
+  healpix_nside_min: 8             # coarsest ~7.3 deg — patch-scale, like hash level 0
+  healpix_nside_max: 64            # finest ~0.92 deg ~ 100 km — honors the cap
+  healpix_index: healpix_index_m8_64.npz   # ladder-specific precompute
   input_dim: 3
   n_levels: 8
   n_features_per_level: 2
@@ -88,15 +104,6 @@ geo:
   base_resolution: 16
   finest_resolution: 128
   altitude: null
-  # Noise-dependent level gating (--gated): multiply embedding level l by
-  # sigmoid((u - c_l) / width) where u is the signal fraction (DDPM: 1 - t/T;
-  # transport: t) and c_l = l/(L-1) * c_max — fine levels fade out at high
-  # noise so early denoising can't lean on (memorize) fine-scale features.
-  # Zero parameters; applies to leveled encoders (hash, healpix, hash_static —
-  # static tail stays ungated). Checkpoint suffix gains "_gated".
-  level_gating: false
-  gating_c_max: 0.6                # threshold of the finest level (coarsest = 0)
-  gating_width: 0.1                # sigmoid softness
 
 # Split-model Phase A: conditional diffusion on the residual HF - bicubic,
 # ratio randomized per batch; test at a held-out divisor (16) for generalization.

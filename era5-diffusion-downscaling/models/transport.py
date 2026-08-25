@@ -25,10 +25,11 @@ class ConditionalTransportUNet(nn.Module):
     """UNet vector field conditioned on LF input and optional geography."""
 
     def __init__(self, base_unet: nn.Module, time_scale: float = 1000.0,
-                 geo_encoder: nn.Module | None = None):
+                 geo_encoder: nn.Module | None = None, level_gate=None):
         super().__init__()
         self.unet = base_unet
         self.geo = geo_encoder
+        self.gate = level_gate
         self.time_scale = float(time_scale)
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, cond):
@@ -37,8 +38,12 @@ class ConditionalTransportUNet(nn.Module):
         if self.geo is not None:
             if coords is None:
                 raise ValueError("geo-conditioned transport model needs coordinates")
-            emb = self.geo(coords).permute(0, 3, 1, 2).contiguous()
-            chans.append(emb)
+            from models.geo_encoding import checkpointed_embed
+            emb = checkpointed_embed(self.geo, coords)
+            if self.gate is not None:
+                # transport time runs 0 (noise) -> 1 (data): t IS the signal fraction
+                emb = self.gate(emb, t.float().clamp(0.0, 1.0))
+            chans.append(emb.permute(0, 3, 1, 2).contiguous())
         return self.unet(torch.cat(chans, dim=1), t * self.time_scale)
 
 
@@ -48,11 +53,12 @@ def build_transport_model(cfg: dict, method: str) -> ConditionalTransportUNet:
         raise ValueError(f"unknown transport method: {method}")
     geo_on = cfg.get("geo", {}).get("enabled", False)
     if geo_on:
-        from models.geo_encoding import build_geo_encoder
+        from models.geo_encoding import build_geo_encoder, build_level_gate
         geo_encoder = build_geo_encoder(cfg)
         geo_channels = geo_encoder.output_dim
+        level_gate = build_level_gate(cfg)
     else:
-        geo_encoder, geo_channels = None, 0
+        geo_encoder, geo_channels, level_gate = None, 0, None
 
     # Current field + one LF conditioning channel + optional geo embedding.
     # Stochastic interpolants predict [velocity, scaled_score].
@@ -64,7 +70,8 @@ def build_transport_model(cfg: dict, method: str) -> ConditionalTransportUNet:
     base = build_unet(model_cfg, use_time=True,
                       extra_in_channels=1 + geo_channels)
     return ConditionalTransportUNet(
-        base, cfg.get("transport", {}).get("time_scale", 1000.0), geo_encoder
+        base, cfg.get("transport", {}).get("time_scale", 1000.0), geo_encoder,
+        level_gate=level_gate,
     )
 
 
@@ -98,9 +105,10 @@ class FlowMatching:
     @torch.no_grad()
     def sample(self, model: nn.Module, low_res: torch.Tensor, coords=None,
                steps: int = 100, solver: str = "heun", project: str = "none",
-               coarse: torch.Tensor | None = None, ratio: int | None = None):
+               coarse: torch.Tensor | None = None, ratio: int | None = None,
+               noise: torch.Tensor | None = None):
         return integrate_transport(model, low_res, coords, steps, solver,
-                                   project, coarse, ratio)
+                                   project, coarse, ratio, noise=noise)
 
 
 class StochasticInterpolant:
@@ -158,21 +166,26 @@ class StochasticInterpolant:
     def sample(self, model: nn.Module, low_res: torch.Tensor, coords=None,
                steps: int = 100, solver: str = "heun", sampler: str = "ode",
                stochasticity: float = 0.1, project: str = "none",
-               coarse: torch.Tensor | None = None, ratio: int | None = None):
+               coarse: torch.Tensor | None = None, ratio: int | None = None,
+               noise: torch.Tensor | None = None):
         if sampler == "ode":
             return integrate_transport(model, low_res, coords, steps, solver,
-                                       project, coarse, ratio, split_velocity=True)
+                                       project, coarse, ratio, split_velocity=True,
+                                       noise=noise)
         if sampler != "sde":
             raise ValueError("sampler must be 'ode' or 'sde'")
         return self._sample_sde(model, low_res, coords, steps, stochasticity,
-                                project, coarse, ratio)
+                                project, coarse, ratio, noise)
 
     def _sample_sde(self, model, low_res, coords, steps, stochasticity,
-                    project, coarse, ratio):
+                    project, coarse, ratio, noise=None):
         _validate_sampling(steps, "euler", project, coarse, ratio)
         if stochasticity < 0:
             raise ValueError("stochasticity must be non-negative")
-        x = torch.randn_like(low_res)
+        # Only the INITIAL state is shareable across overlapping tiles; the
+        # per-step dW increments stay independent (overlap-blending averages
+        # the residual disagreement).
+        x = _initial_noise(low_res, noise)
         dt = 1.0 / steps
         for i in range(steps):
             t_value = i / steps
@@ -209,14 +222,26 @@ def _validate_sampling(steps, solver, project, coarse, ratio):
         raise ValueError("data-consistency projection needs coarse and ratio")
 
 
+def _initial_noise(low_res: torch.Tensor, noise: torch.Tensor | None) -> torch.Tensor:
+    """Fresh Gaussian noise, or a caller-supplied field (e.g. tiles cropped
+    from one global noise field so overlapping tiles agree)."""
+    if noise is None:
+        return torch.randn_like(low_res)
+    if noise.shape != low_res.shape:
+        raise ValueError(f"noise shape {tuple(noise.shape)} != input shape "
+                         f"{tuple(low_res.shape)}")
+    return noise.to(device=low_res.device, dtype=low_res.dtype)
+
+
 @torch.no_grad()
 def integrate_transport(model: nn.Module, low_res: torch.Tensor, coords=None,
                         steps: int = 100, solver: str = "heun",
                         project: str = "none", coarse=None, ratio=None,
-                        split_velocity: bool = False):
+                        split_velocity: bool = False,
+                        noise: torch.Tensor | None = None):
     """Euler/Heun integration of a learned probability-flow ODE, t=0 -> 1."""
     _validate_sampling(steps, solver, project, coarse, ratio)
-    x = torch.randn_like(low_res)
+    x = _initial_noise(low_res, noise)
     dt = 1.0 / steps
     cond = (low_res, coords)
     for i in range(steps):

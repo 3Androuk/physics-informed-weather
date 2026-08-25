@@ -22,8 +22,8 @@ from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
-                   run_name, set_seed)
+from utils import (ensure_dir, geo_suffix, get_device, init_wandb,  # noqa: E402
+                   load_config, run_name, set_seed)
 
 
 def main():
@@ -40,9 +40,13 @@ def main():
                     help="Override config seed for replicate runs; the checkpoint "
                          "name gets an _s<seed> suffix so replicates don't "
                          "overwrite the primary run.")
-    ap.add_argument("--encoder", choices=["hash", "healpix"], default=None,
+    ap.add_argument("--encoder", choices=["hash", "healpix", "xyz", "sinusoidal", "static", "hash_static"], default=None,
                     help="Override geo.encoder from the CLI so the config can "
                          "keep its default.")
+    ap.add_argument("--gated", action="store_true",
+                    help="Force geo.level_gating: true — noise-dependent gating "
+                         "of the embedding levels (fine levels fade out at high "
+                         "noise); checkpoint gains a _gated suffix.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -51,6 +55,8 @@ def main():
         cfg.setdefault("geo", {})["enabled"] = True
     if args.encoder is not None:
         cfg.setdefault("geo", {})["encoder"] = args.encoder
+    if args.gated:
+        cfg.setdefault("geo", {})["level_gating"] = True
     if args.seed is not None:
         cfg["seed"] = args.seed
     set_seed(cfg["seed"])
@@ -63,8 +69,7 @@ def main():
 
     geo_on = cfg.get("geo", {}).get("enabled", False)
     seed_suffix = f"_s{cfg['seed']}" if args.seed is not None else ""
-    hpx = geo_on and cfg["geo"].get("encoder", "hash") == "healpix"
-    ckpt_name = f"diffusion{'_geo' if geo_on else ''}{'_hpx' if hpx else ''}{seed_suffix}.pt"
+    ckpt_name = f"diffusion{geo_suffix(cfg)}{seed_suffix}.pt"
 
     normalizer = load_norm_stats(patch_dir)
     if geo_on:
@@ -75,6 +80,8 @@ def main():
             coords_full_path=patch_dir / "coords_full.npz",
             geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
             geo_encoder=gcfg.get("encoder", "hash"),
+            healpix_index_path=((patch_dir / gcfg["healpix_index"])
+                                if gcfg.get("healpix_index") else None),
         )
     else:
         ds = PatchDataset(patch_dir / "train_patches.npy", normalizer)
@@ -101,6 +108,8 @@ def main():
                 coords_full_path=patch_dir / "coords_full.npz",
                 geo_input_dim=gcfg["input_dim"], altitude=gcfg["altitude"],
                 geo_encoder=gcfg.get("encoder", "hash"),
+            healpix_index_path=((patch_dir / gcfg["healpix_index"])
+                                if gcfg.get("healpix_index") else None),
             )
         else:
             val_ds = PatchDataset(test_path, normalizer)
@@ -112,10 +121,12 @@ def main():
         print("(no test_patches.npy — skipping val loss)")
 
     if geo_on:
-        from models.geo_encoding import GeoConditionedUNet, build_geo_encoder
+        from models.geo_encoding import (GeoConditionedUNet, build_geo_encoder,
+                                         build_level_gate)
         geo_enc = build_geo_encoder(cfg)
         base = build_unet(cfg, use_time=True, extra_in_channels=geo_enc.output_dim)
-        model = GeoConditionedUNet(base, geo_enc).to(device)
+        model = GeoConditionedUNet(base, geo_enc, level_gate=build_level_gate(cfg),
+                                   ddpm_timesteps=cfg["diffusion"]["timesteps"]).to(device)
     else:
         model = build_unet(cfg, use_time=True).to(device)
     diffusion = build_diffusion(cfg).to(device)

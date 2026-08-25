@@ -64,7 +64,7 @@ def main():
         wts[lv] = wt.T.reshape(h, w_, 4).astype(np.float32)
         print(f"level {lv}: Nside {ns:4d} | cells {12 * ns * ns:>9,}")
 
-    out = patch_dir / "healpix_index.npz"
+    out = patch_dir / g.get("healpix_index", "healpix_index.npz")
     np.savez(out, idx=idx, w=wts, nsides=np.array(nsides, dtype=np.int64), scheme="ring")
     n_params = sum(12 * ns * ns for ns in nsides) * g["n_features_per_level"]
     print(f"-> {out} | grid {h}x{w_} | encoder table params: {n_params:,}")
