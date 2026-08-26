@@ -150,6 +150,16 @@ weather_ddnm:
   shrinkage: 0.02                  # shrink empirical power toward white noise
   relative_floor: 1.0e-4           # positive floor relative to mean power
   inverse_floor: 1.0e-7            # numerical floor for (A C A^T)^-1
+  # Leakage control during estimation: patches are windows on a larger field,
+  # so their linear gradient leaks broadband power and flattens the spectrum
+  # toward white (which degrades the projector toward ordinary DDNM).
+  estimation_window: hann          # none | hann (planar detrend is always on
+                                   # unless --no-detrend is passed)
+  # Localization: the projector applies C as a CIRCULAR convolution, but
+  # patches are not periodic. A Gaspari-Cohn taper of this half-width (PIXELS,
+  # support 2x) confines the correction to a physical neighborhood so it
+  # cannot wrap across the patch edge. 0 disables; ~size/4 is a safe default.
+  localization_radius: 32
 
 eval:
   n_test_patches: 256

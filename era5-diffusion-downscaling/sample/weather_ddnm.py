@@ -25,6 +25,67 @@ import torch
 from data.degrade import coarsen, upsample_nearest
 
 
+def _gaspari_cohn(radius: torch.Tensor) -> torch.Tensor:
+    """Gaspari-Cohn (1999) 5th-order correlation function, support on [0, 2].
+
+    Positive definite and compactly supported — the standard localization
+    kernel in ensemble data assimilation."""
+    r = radius.clamp_min(0.0)
+    r_safe = r.clamp_min(1e-12)
+    near = (1.0 - 0.25 * r**5 + 0.5 * r**4 + 0.625 * r**3 - (5.0 / 3.0) * r**2)
+    far = ((1.0 / 12.0) * r**5 - 0.5 * r**4 + 0.625 * r**3
+           + (5.0 / 3.0) * r**2 - 5.0 * r + 4.0 - 2.0 / (3.0 * r_safe))
+    # Support is [0, 2): forcing the tail to exact zero keeps the tapered
+    # kernel exactly compact instead of leaving polynomial roundoff behind.
+    out = torch.where(r <= 1.0, near, torch.where(r < 2.0, far,
+                                                  torch.zeros_like(r)))
+    return out.clamp_min(0.0)
+
+
+def localize_spectrum(power, image_size, radius: float, floor: float = 1e-6):
+    """Taper a stationary covariance to compact spatial support.
+
+    The projector applies ``C`` as a CIRCULAR convolution, but weather patches
+    are not periodic: an untapered covariance with correlation length
+    comparable to the patch spreads the data-consistency correction across the
+    wrap-around edge. Multiplying the covariance KERNEL by a Gaspari-Cohn
+    window of half-width ``radius`` pixels (support 2*radius) confines the
+    correction to a physical neighborhood, so the periodic embedding becomes
+    harmless. Because Gaspari-Cohn is itself positive definite, the Schur
+    product theorem keeps the tapered covariance positive definite — the exact
+    FFT algebra downstream is unchanged.
+
+    Args:
+        power: (C, H, W//2+1) covariance eigenvalues (rFFT layout).
+        image_size: (H, W) of the high-resolution grid.
+        radius: localization half-width in pixels; the kernel vanishes beyond
+            2*radius. Values >= max(H, W) / 2 leave the covariance essentially
+            untouched (no wrap to suppress).
+        floor: relative floor re-applied after tapering (tapering can push
+            eigenvalues to ~0 through roundoff).
+    Returns:
+        (C, H, W//2+1) tapered eigenvalues, finite and strictly positive.
+    """
+    power = torch.as_tensor(power, dtype=torch.float32)
+    if power.ndim == 2:
+        power = power.unsqueeze(0)
+    h, w = int(image_size[0]), int(image_size[1])
+    if radius <= 0:
+        raise ValueError("localization radius must be positive")
+    # Toroidal distance from the kernel origin keeps the taper circulant.
+    dy = torch.arange(h).float()
+    dx = torch.arange(w).float()
+    dy = torch.minimum(dy, h - dy)
+    dx = torch.minimum(dx, w - dx)
+    dist = torch.sqrt(dy[:, None] ** 2 + dx[None, :] ** 2)
+    window = _gaspari_cohn(dist / float(radius))
+
+    kernel = torch.fft.irfft2(power, s=(h, w)) * window
+    tapered = torch.fft.rfft2(kernel).real
+    scale = tapered.amax(dim=(-2, -1), keepdim=True).clamp_min(1e-30)
+    return tapered.clamp_min(scale * floor)
+
+
 class SpectralCovarianceProjector:
     """Single- or diagonal-multichannel stationary covariance projector.
 
@@ -63,12 +124,19 @@ class SpectralCovarianceProjector:
         self._coarse_spectra = {}
 
     @classmethod
-    def from_npz(cls, path, inverse_floor: float = 1e-7):
-        """Load the artifact written by ``data.estimate_spectral_covariance``."""
+    def from_npz(cls, path, inverse_floor: float = 1e-7,
+                 localization_radius: float | None = None):
+        """Load the artifact written by ``data.estimate_spectral_covariance``.
+
+        ``localization_radius`` (pixels) applies the Gaspari-Cohn taper at load
+        time, so an artifact estimated without localization can still be used
+        with it (and the setting ablated) without re-estimating."""
         path = Path(path)
         with np.load(path) as data:
             power = np.array(data["power"], dtype=np.float32)
             image_size = tuple(int(v) for v in data["image_size"])
+        if localization_radius is not None:
+            power = localize_spectrum(power, image_size, localization_radius)
         return cls(power, image_size, inverse_floor=inverse_floor)
 
     def to(self, device=None, dtype=None):

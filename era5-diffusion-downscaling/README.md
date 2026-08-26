@@ -337,6 +337,18 @@ Headline table: rows `{4× in-dist, 8× out-of-dist}` × columns
   https://arxiv.org/abs/2108.02938 — the ancestor: per-step low-frequency
   replacement on the noisy iterate.
 
+**Covariance-aware projection (Weather-DDNM):**
+- Song, J., Vahdat, A., Mardani, M., Kautz, J. (2023). *Pseudoinverse-Guided
+  Diffusion Models for Inverse Problems* (Pi-GDM). ICLR — the covariance-weighted
+  pseudoinverse guidance this specializes; here C is a data-estimated
+  stationary weather spectrum rather than an isotropic approximation.
+- Kawar, B., Elad, M., Ermon, S., Song, J. (2022). *Denoising Diffusion
+  Restoration Models* (DDRM). NeurIPS. https://arxiv.org/abs/2201.11793
+- Gaspari, G., Cohn, S.E. (1999). *Construction of correlation functions in two
+  and three dimensions.* QJRMS 125, 723 — the compactly-supported localization
+  kernel used to keep the periodic covariance embedding from wrapping
+  corrections across a patch edge.
+
 **Residual (split-model) diffusion:**
 - Mardani, M., et al. (2025). *Residual corrective diffusion modeling for
   km-scale atmospheric downscaling* (CorrDiff). Communications Earth &

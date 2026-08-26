@@ -149,6 +149,11 @@ def main():
                         help="Checkpoint name in paths.ckpt_dir or an absolute path.")
     parser.add_argument("--covariance", default=None,
                         help="Override the configured covariance artifact path.")
+    parser.add_argument("--localization-radius", type=float, default=None,
+                        help="Re-taper the loaded covariance kernel to this "
+                             "Gaspari-Cohn half-width in PIXELS at load time, so "
+                             "localization can be ablated without re-estimating; "
+                             "omitted keeps the artifact as saved.")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-patches", type=int, default=None)
@@ -189,7 +194,9 @@ def main():
     coords = (_geo_payload(patch_dir, normalizer, n, geo_cfg, device)
               if geo_cfg.get("enabled", False) else None)
     projector = SpectralCovarianceProjector.from_npz(
-        covariance_path, inverse_floor=float(weather_cfg.get("inverse_floor", 1e-7)))
+        covariance_path, inverse_floor=float(weather_cfg.get("inverse_floor", 1e-7)),
+        localization_radius=(args.localization_radius
+                             if args.localization_radius else None))
     expected_size = tuple(hf.shape[-2:])
     if projector.image_size != expected_size:
         raise ValueError(
