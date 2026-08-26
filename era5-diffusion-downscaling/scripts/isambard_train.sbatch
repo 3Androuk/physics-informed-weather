@@ -10,11 +10,12 @@
 # train.train_diffusion, train.train_directmap, train.train_residual,
 # train.train_flow_matching, train.train_stochastic_interpolant.
 #
-# WHY A WHOLE NODE: BriCS bills in NODE-hours and a partial-node job is charged
-# for the entire node. Asking for 1 of the 4 GH200s costs exactly the same as
-# asking for all 4, so anything less than --gpus=4 throws away 75% of what you
-# already paid for. Note scripts/train_multinode.sh defaults to 4 nodes x 1 GPU
-# — right for a 1-GPU-per-node cluster, four times the cost here.
+# WHY A WHOLE NODE: BriCS bills in NODE-hours (the docs do not say whether a
+# partial-node job is charged for the whole node — check TRESBillingWeights via
+# `scontrol show partition`). Taking all 4 GH200s and running 4-way DDP means
+# every GPU billed is a GPU working, which is right under either rule. Note
+# scripts/train_multinode.sh defaults to 4 nodes x 1 GPU — right for a
+# 1-GPU-per-node cluster, four nodes' worth of billing here for the same 4 GPUs.
 #
 # Env overrides:
 #   ERA5_VENV    path to the venv           (default $SLURM_SUBMIT_DIR/.venv)

@@ -4,12 +4,13 @@
 #   scripts/download_login.sh config/wb2_20var.yaml
 #
 # WHY THE LOGIN NODE: Isambard-AI has no CPU-only partition, so a Slurm download
-# would hold a whole 4x GH200 node — billed in node-hours — while doing nothing
-# but wait on the network. Login nodes are not a Slurm allocation and cost
-# nothing. They do cap each user at ~4 GiB RAM, which is why the flags below
-# keep the footprint small: data.download_era5 streams each batch straight into
-# an on-disk memmap (~0.8 GiB peak at --batch 16), rather than buffering a whole
-# year (~19 GiB at 20 channels, which the cap would kill).
+# would hold GPUs — billed in node-hours — while doing nothing but wait on the
+# network. Login nodes are not a Slurm allocation, so they should not be billed
+# at all (worth confirming against the project balance the first time). They do
+# cap each user at ~4 GiB RAM, which is why the flags below keep the footprint
+# small: data.download_era5 streams each batch straight into an on-disk memmap
+# (~0.8 GiB peak at --batch 16), rather than buffering a whole year (~19 GiB at
+# 20 channels, which the cap would kill).
 #
 # Resumable: each year is cached separately and a rerun skips finished years,
 # so just run it again if the link drops.

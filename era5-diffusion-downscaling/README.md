@@ -316,10 +316,14 @@ serves machines with different GPU memory and core counts without being forked.
 ### Running on BriCS Isambard-AI
 
 Isambard-AI nodes are **4× GH200** (96 GB HBM each, 288 Grace cores, aarch64)
-and the site **bills in node-hours, charging a partial-node job for the whole
-node**. Asking for 1 GPU therefore costs exactly what 4 cost. Two consequences
-shape everything below: always take the whole node, and never hold a node for
-work that does not use the GPUs.
+and the site bills in **node-hours (NHR)**; the `interactive` reservation costs
+1.5× that. Whether a partial-node job is charged for the whole node is *not*
+stated in the BriCS docs — check `scontrol show partition` for
+`TRESBillingWeights`, and `sacct -o JobID,AllocTRES` for a finished job's
+`billing=` value, which settles it from the scheduler itself.
+
+Either way the guidance below holds: run 4-way DDP so all four GPUs do real
+work, and never hold a GPU node for work that does not use the GPUs.
 
 ```bash
 # Whole node, all 4 GH200s, auto-chained across the 24h walltime limit
