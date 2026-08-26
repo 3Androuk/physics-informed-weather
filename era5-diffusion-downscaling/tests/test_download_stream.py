@@ -1,13 +1,17 @@
 """Tests for the low-memory per-year download path.
 
-Two constraints, both measured on a BriCS login node against its 4 GiB cgroup
+Three constraints, all measured on a BriCS login node against its 4 GiB cgroup
 cap (`MemoryMax=4294967296`):
 
-1. `_download_year` must write batches STRAIGHT into an on-disk memmap.
-   Buffering a whole year costs ~19 GiB at 20 channels.
-2. It must read ONE CHANNEL AT A TIME. Concatenating 20 variables and calling
-   `.values` once makes dask materialize all 20 variables' chunks together,
-   which peaked at 3.46 GiB and was OOM-killed (exit 137) even at --batch 4.
+1. `_download_year` writes batches STRAIGHT into an on-disk memmap. Buffering a
+   whole year costs ~19 GiB at 20 channels.
+2. It reads ONE VARIABLE GROUP AT A TIME. Concatenating 20 variables and
+   calling `.values` once made dask materialize every variable's chunks
+   together: peak 3.46 GiB, OOM-killed (exit 137) even at --batch 4.
+3. All levels of a variable come from ONE read. WB2 chunks pressure-level
+   variables as (1, 13, 721, 1440) — every level in a single 51.5 MiB chunk —
+   so z500/z700/z850 as separate channel reads refetched that same chunk three
+   times, ~772 MiB pulled per timestep to keep ~59 MiB.
 
 xarray is not needed: `_open_da` / `_year_sub` are patched with array-backed
 fakes, so these run anywhere the rest of the suite runs.
@@ -22,39 +26,46 @@ import numpy as np
 
 from data import download_era5 as dl
 
+# Channel layout under test: ch0 is a surface variable, ch1/ch2 are two levels
+# of one pressure variable (so they must arrive in a single grouped read).
+SURFACE_CH = 0
+LEVEL_CHS = (1, 2)
+
 
 class _FakeSel:
     def __init__(self, arr):
         self.values = arr
 
 
-class _FakeChannel:
-    """Stand-in for one variable's DataArray: (time, latitude, longitude)."""
+class _FakeGroup:
+    """One variable: (time, latitude, longitude), or (time, level, lat, lon)."""
 
-    def __init__(self, arr, ci, reads, fail=None, nan=None):
-        self._arr = arr            # full (T, C, H, W)
-        self._ci = ci
-        self._reads = reads        # shared log of (channel, start, stop)
-        self._fail = fail if fail is not None else {}
-        self._nan = nan or set()
+    def __init__(self, arr, gi, chans, reads, fail, nan):
+        self._arr = arr                # full (T, C, H, W)
+        self._gi = gi
+        self._chans = chans            # channel indices this variable supplies
+        self._reads = reads
+        self._fail = fail
+        self._nan = nan
         T, _, H, W = arr.shape
         self.sizes = {"time": T, "latitude": H, "longitude": W}
 
     def isel(self, time):
-        key = (self._ci, time.start, time.stop)
+        key = (self._gi, time.start, time.stop)
         self._reads.append(key)
         if self._fail.get(key, 0) > 0:
             self._fail[key] -= 1
             raise OSError("simulated GCS stall")
-        chunk = self._arr[time, self._ci].copy()   # (t, H, W) — one channel only
+        if len(self._chans) == 1:                       # surface: (t, H, W)
+            chunk = self._arr[time, self._chans[0]].copy()
+        else:                                           # levels: (t, L, H, W)
+            chunk = np.stack([self._arr[time, c] for c in self._chans], axis=1)
         if key in self._nan:
-            chunk[0, 0, 0] = np.nan
+            chunk.reshape(-1)[0] = np.nan
         return _FakeSel(chunk)
 
 
 class _Fixture:
-    """Serves per-channel fakes through the two patched entry points."""
-
     def __init__(self, arr, fail=None, nan=None):
         self.arr = arr
         self.reads = []
@@ -66,9 +77,13 @@ class _Fixture:
 
     def open_da(self, *a, **k):
         self.opens += 1
-        das = [_FakeChannel(self.arr, ci, self.reads, self._fail, self._nan)
-               for ci in range(self.arr.shape[1])]
-        return das, self.lat, self.lon
+        groups = [
+            (_FakeGroup(self.arr, 0, [SURFACE_CH], self.reads, self._fail, self._nan),
+             [(SURFACE_CH, None)]),
+            (_FakeGroup(self.arr, 1, list(LEVEL_CHS), self.reads, self._fail, self._nan),
+             [(ci, pos) for pos, ci in enumerate(LEVEL_CHS)]),
+        ]
+        return groups, self.lat, self.lon
 
     def patches(self):
         return (mock.patch.object(dl, "_open_da", self.open_da),
@@ -92,6 +107,7 @@ class DownloadStreamTests(unittest.TestCase):
                                      max_retries, self.out)
 
     def test_streams_exact_contents(self):
+        """Every channel lands in its own slot, levels scattered correctly."""
         fx = _Fixture(self.arr)
         shape, lat, lon = self._run(fx, batch=3)
         self.assertEqual(shape, self.arr.shape)
@@ -99,31 +115,34 @@ class DownloadStreamTests(unittest.TestCase):
         self.assertEqual(len(lat), self.arr.shape[2])
         self.assertEqual(len(lon), self.arr.shape[3])
 
-    def test_reads_one_channel_at_a_time(self):
-        """The OOM fix: never a read spanning all channels at once."""
+    def test_one_read_per_variable_not_per_channel(self):
+        """The chunk-refetch fix: 2 variables => 2 reads per batch, not 3."""
+        fx = _Fixture(self.arr)
+        self._run(fx, batch=3)
+        per_batch = {}
+        for gi, s, e in fx.reads:
+            per_batch.setdefault((s, e), []).append(gi)
+        for span, gis in per_batch.items():
+            self.assertEqual(sorted(gis), [0, 1],
+                             f"batch {span} did not read exactly one read per variable")
+
+    def test_never_reads_all_channels_at_once(self):
+        """No single read may span the whole channel axis."""
         fx = _Fixture(self.arr)
         captured = []
-        real = _FakeChannel.isel
+        real = _FakeGroup.isel
 
         def spy(self_, time):
             sel = real(self_, time)
             captured.append(sel.values.shape)
             return sel
 
-        with mock.patch.object(_FakeChannel, "isel", spy):
+        with mock.patch.object(_FakeGroup, "isel", spy):
             self._run(fx, batch=3)
-        # every read is (t, H, W) — 3-D, one channel — never (t, C, H, W)
-        self.assertTrue(all(len(s) == 3 for s in captured), captured)
-        self.assertTrue(all(s[1:] == self.arr.shape[2:] for s in captured), captured)
-
-    def test_every_channel_and_timestep_covered_exactly_once(self):
-        fx = _Fixture(self.arr)
-        self._run(fx, batch=3)
-        expected = [(ci, s, e) for s, e in [(0, 3), (3, 6), (6, 7)]
-                    for ci in range(self.arr.shape[1])]
-        # batch-major, channel-minor
-        self.assertEqual(sorted(fx.reads), sorted(expected))
-        self.assertEqual(len(fx.reads), len(set(fx.reads)))
+        C = self.arr.shape[1]
+        for s in captured:
+            width = s[1] if len(s) == 4 else 1
+            self.assertLess(width, C, f"read spanned all {C} channels: {s}")
 
     def test_never_allocates_a_full_year_in_ram(self):
         fx = _Fixture(self.arr)
@@ -145,6 +164,13 @@ class DownloadStreamTests(unittest.TestCase):
         self.assertTrue(all(stop - start <= 2 for _, start, stop in fx.reads),
                         fx.reads)
 
+    def test_every_timestep_covered_exactly_once(self):
+        fx = _Fixture(self.arr)
+        self._run(fx, batch=3)
+        expected = [(gi, s, e) for s, e in [(0, 3), (3, 6), (6, 7)] for gi in (0, 1)]
+        self.assertEqual(sorted(fx.reads), sorted(expected))
+        self.assertEqual(len(fx.reads), len(set(fx.reads)))
+
     def test_retries_then_succeeds(self):
         fx = _Fixture(self.arr, fail={(1, 3, 6): 2})
         with mock.patch.object(dl.time, "sleep", lambda _s: None):
@@ -160,12 +186,10 @@ class DownloadStreamTests(unittest.TestCase):
                 self._run(fx, batch=3, max_retries=2)
 
     def test_nan_fails_fast_and_is_not_retried(self):
-        """A NaN field is bad data, not a stalled connection."""
         fx = _Fixture(self.arr, nan={(1, 0, 3)})
         with mock.patch.object(dl.time, "sleep", lambda _s: None):
             with self.assertRaises(dl.BadFieldData):
                 self._run(fx, batch=3, max_retries=4)
-        # ch0 then ch1 of the first batch, and no retry storm on the bad one
         self.assertEqual(fx.reads, [(0, 0, 3), (1, 0, 3)])
 
 

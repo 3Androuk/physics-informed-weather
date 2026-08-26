@@ -85,14 +85,29 @@ def _open_da(dcfg, lat_range, timeout, chunk_time):
     lo, hi = lat_range
     keep = np.where((lat_all >= lo) & (lat_all <= hi))[0]
 
-    das = []
-    for spec in channel_specs(dcfg):
-        da = ds[spec["name"]]
-        if spec["level"] is not None:  # surface variables (e.g. 2m_temperature) have no level dim
-            da = da.sel(level=spec["level"])
+    # Group the requested channels BY VARIABLE and take all of that variable's
+    # levels in one selection. WB2 stores pressure-level variables with every
+    # level in a single chunk — geopotential is (1, 13, 721, 1440) = 51.5 MiB —
+    # so `.sel(level=500)` still fetches all 13 levels. Asking for z500/z700/z850
+    # as three separate channels therefore refetched the identical chunk three
+    # times: ~772 MiB pulled per timestep to keep ~59 MiB. One read per variable
+    # cuts both the traffic and the peak working set by ~3x here.
+    by_var = {}
+    for ci, spec in enumerate(channel_specs(dcfg)):
+        by_var.setdefault(spec["name"], []).append((ci, spec["level"]))
+
+    groups = []
+    for name, entries in by_var.items():
+        da = ds[name]
+        levels = [lv for _, lv in entries if lv is not None]
+        if levels:
+            da = da.sel(level=levels)
+            slots = [(ci, levels.index(lv)) for ci, lv in entries]
+        else:  # surface variable (e.g. 2m_temperature) — no level dim
+            slots = [(ci, None) for ci, _ in entries]
         da = da.reset_coords(drop=True).isel(latitude=keep)
-        das.append(da.transpose("time", "latitude", "longitude"))
-    return das, lat_all[keep], ds["longitude"].values
+        groups.append((da, slots))
+    return groups, lat_all[keep], ds["longitude"].values
 
 
 def _year_sub(da, year, stride):
@@ -121,9 +136,10 @@ def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time,
     """
     from numpy.lib.format import open_memmap
 
-    das, lat, lon = _open_da(dcfg, lat_range, timeout, chunk_time)
-    subs = [_year_sub(d, year, stride) for d in das]
-    T, C = int(subs[0].sizes["time"]), len(subs)
+    groups, lat, lon = _open_da(dcfg, lat_range, timeout, chunk_time)
+    subs = [(_year_sub(d, year, stride), slots) for d, slots in groups]
+    T = int(subs[0][0].sizes["time"])
+    C = sum(len(slots) for _, slots in subs)
     H, W = len(lat), len(lon)
 
     out = open_memmap(out_path, mode="w+", dtype=np.float32, shape=(T, C, H, W))
@@ -135,17 +151,20 @@ def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time,
         start = 0
         while start < T:
             stop = min(start + batch, T)
-            # One channel at a time: the working set is a single variable's
-            # chunks, not all C at once (see _open_da).
-            for ci in range(C):
+            # One VARIABLE at a time: the working set is a single variable's
+            # chunks (all its levels, which arrive together anyway), not all C
+            # channels at once — see _open_da.
+            for gi in range(len(subs)):
                 for attempt in range(1, max_retries + 1):
                     try:
-                        chunk = subs[ci].isel(time=slice(start, stop)).values.astype(np.float32)
+                        sub, slots = subs[gi]
+                        chunk = sub.isel(time=slice(start, stop)).values.astype(np.float32)
                         if not np.isfinite(chunk).all():
                             raise BadFieldData(
-                                f"{year} channel {ci} fields [{start}:{stop}] "
-                                "contain NaN/Inf.")
-                        out[start:stop, ci] = chunk
+                                f"{year} {[ci for ci, _ in slots]} fields "
+                                f"[{start}:{stop}] contain NaN/Inf.")
+                        for ci, lpos in slots:
+                            out[start:stop, ci] = chunk if lpos is None else chunk[:, lpos]
                         del chunk
                         break
                     except BadFieldData:           # bad data — retrying refetches it
@@ -153,16 +172,16 @@ def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time,
                     except Exception as e:  # noqa: BLE001 - retry any GCS/dask read error
                         if attempt == max_retries:
                             raise RuntimeError(
-                                f"{year} channel {ci} fields [{start}:{stop}] failed after "
+                                f"{year} group {gi} fields [{start}:{stop}] failed after "
                                 f"{max_retries} attempts: {type(e).__name__}: {e}"
                             ) from e
                         wait = min(30, 3 * attempt)
-                        print(f"    [retry {attempt}/{max_retries}] {year} ch{ci} "
+                        print(f"    [retry {attempt}/{max_retries}] {year} grp{gi} "
                               f"[{start}:{stop}] {type(e).__name__}; reconnecting in "
                               f"{wait}s ...", flush=True)
                         time.sleep(wait)
-                        das, _, _ = _open_da(dcfg, lat_range, timeout, chunk_time)
-                        subs = [_year_sub(d, year, stride) for d in das]
+                        groups, _, _ = _open_da(dcfg, lat_range, timeout, chunk_time)
+                        subs = [(_year_sub(d, year, stride), sl) for d, sl in groups]
             start = stop
             print(f"    {year}: {stop}/{T}", flush=True)
         out.flush()
