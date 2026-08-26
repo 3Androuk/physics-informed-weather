@@ -17,8 +17,11 @@ flaky link to GCS:
   * Small dask chunks (--chunk-time) keep individual reads tiny — an oversized
     chunk that can't be read before the timeout fires is the usual cause of
     "times out on the first year".
-  * Per-year arrays are merged into train.npy / test.npy via a memmap, so the
-    merge never holds more than one year in RAM.
+  * Every write goes through an on-disk memmap — each year is STREAMED into its
+    cache file batch by batch, and the caches are merged into train.npy /
+    test.npy the same way. Peak RAM is one batch (~0.8 GiB at --batch 16),
+    never a whole year (~19 GiB at 20 channels), so the download runs on a
+    login node instead of costing GPU node-hours.
 
 Note: striding (data.time_stride) is applied within each year, so the exact
 timesteps chosen differ negligibly from striding the whole range at once; this
@@ -38,6 +41,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils import channel_labels, channel_specs, ensure_dir, load_config  # noqa: E402
+
+
+class BadFieldData(Exception):
+    """NaN/Inf in a fetched batch — a data fault, never a transport fault.
+
+    Distinct from the transient errors the retry loop swallows: reconnecting
+    would refetch the same bad numbers, so this propagates immediately.
+    """
 
 
 def _open_da(dcfg, lat_range, timeout, chunk_time):
@@ -85,46 +96,69 @@ def _year_sub(da, year, stride):
     return sub
 
 
-def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time, max_retries):
-    """Fetch one year in small batches -> (arr (T, C, H, W) float32, lat, lon).
+def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time,
+                   max_retries, out_path):
+    """Stream one year into `out_path` (.npy) -> (shape (T, C, H, W), lat, lon).
 
     Each batch of `batch` (strided) fields is read independently and retried on
     failure with a fresh connection, so a stall costs at most one batch.
+
+    Batches are written STRAIGHT INTO an on-disk memmap rather than buffered in
+    a full-year array: at 20 channels a year is ~19 GiB, which does not fit the
+    4 GiB cap on a BriCS login node (and running the download on a GPU compute
+    node instead would burn node-hours with the GPUs idle). Peak RAM here is one
+    batch — ~2.5 GiB at --batch 48, ~0.8 GiB at --batch 16.
+
+    Finiteness is checked per batch, so a bad field fails fast instead of after
+    the whole year has been fetched.
     """
+    from numpy.lib.format import open_memmap
+
     da = _open_da(dcfg, lat_range, timeout, chunk_time)
     sub = _year_sub(da, year, stride)
     T, C = int(sub.sizes["time"]), int(sub.sizes["channel"])
     H, W = int(sub.sizes["latitude"]), int(sub.sizes["longitude"])
     lat, lon = da["latitude"].values, da["longitude"].values
 
-    out = np.empty((T, C, H, W), dtype=np.float32)
+    out = open_memmap(out_path, mode="w+", dtype=np.float32, shape=(T, C, H, W))
     n_batches = (T + batch - 1) // batch
     print(f"  {year}: {T} fields x {C} channels in {n_batches} batches of {batch} ...",
           flush=True)
 
-    start = 0
-    while start < T:
-        stop = min(start + batch, T)
-        for attempt in range(1, max_retries + 1):
-            try:
-                out[start:stop] = sub.isel(time=slice(start, stop)).values.astype(np.float32)
-                break
-            except Exception as e:  # noqa: BLE001 - retry any GCS/dask read error
-                if attempt == max_retries:
-                    raise RuntimeError(
-                        f"{year} fields [{start}:{stop}] failed after {max_retries} "
-                        f"attempts: {type(e).__name__}: {e}"
-                    ) from e
-                wait = min(30, 3 * attempt)
-                print(f"    [retry {attempt}/{max_retries}] {year} [{start}:{stop}] "
-                      f"{type(e).__name__}; reconnecting in {wait}s ...", flush=True)
-                time.sleep(wait)
-                da = _open_da(dcfg, lat_range, timeout, chunk_time)  # fresh session
-                sub = _year_sub(da, year, stride)
-        start = stop
-        print(f"    {year}: {stop}/{T}", flush=True)
+    try:
+        start = 0
+        while start < T:
+            stop = min(start + batch, T)
+            for attempt in range(1, max_retries + 1):
+                try:
+                    chunk = sub.isel(time=slice(start, stop)).values.astype(np.float32)
+                    if not np.isfinite(chunk).all():
+                        raise BadFieldData(
+                            f"{year} fields [{start}:{stop}] contain NaN/Inf.")
+                    out[start:stop] = chunk
+                    del chunk
+                    break
+                except BadFieldData:               # bad data — retrying refetches it
+                    raise
+                except Exception as e:  # noqa: BLE001 - retry any GCS/dask read error
+                    if attempt == max_retries:
+                        raise RuntimeError(
+                            f"{year} fields [{start}:{stop}] failed after {max_retries} "
+                            f"attempts: {type(e).__name__}: {e}"
+                        ) from e
+                    wait = min(30, 3 * attempt)
+                    print(f"    [retry {attempt}/{max_retries}] {year} [{start}:{stop}] "
+                          f"{type(e).__name__}; reconnecting in {wait}s ...", flush=True)
+                    time.sleep(wait)
+                    da = _open_da(dcfg, lat_range, timeout, chunk_time)  # fresh session
+                    sub = _year_sub(da, year, stride)
+            start = stop
+            print(f"    {year}: {stop}/{T}", flush=True)
+        out.flush()
+    finally:
+        del out    # close the mapping before the caller renames the file
 
-    return out, lat, lon
+    return (T, C, H, W), lat, lon
 
 
 def _merge(cache_dir, split, years, out_path):
@@ -197,20 +231,18 @@ def main():
             if ypath.exists():
                 print(f"[skip] {split} {year} already cached", flush=True)
                 continue
-            arr, lat, lon = _download_year(
-                dcfg, lat_range, year, stride, args.batch,
-                args.timeout, args.chunk_time, args.max_retries,
-            )
-            if not np.isfinite(arr).all():
-                raise ValueError(f"{split} {year} contains NaN/Inf.")
+            # Streamed straight into the .tmp memmap, then renamed: an
+            # interrupted year leaves a .tmp that the next run overwrites,
+            # never a half-written file that "resume" would trust.
             tmp = ypath.with_suffix(".npy.tmp")
-            with open(tmp, "wb") as fh:  # file object: np.save won't append .npy
-                np.save(fh, arr)
+            shape, lat, lon = _download_year(
+                dcfg, lat_range, year, stride, args.batch,
+                args.timeout, args.chunk_time, args.max_retries, tmp,
+            )
             tmp.replace(ypath)
-            print(f"[done] {split} {year}: {arr.shape} -> {ypath.name}", flush=True)
+            print(f"[done] {split} {year}: {shape} -> {ypath.name}", flush=True)
             if not coords_path.exists():
                 np.savez(coords_path, lat=lat, lon=lon, channels=np.array(labels))
-            del arr
 
     if not coords_path.exists():  # e.g. resumed run where every year was cached
         da = _open_da(dcfg, lat_range, args.timeout, args.chunk_time)
