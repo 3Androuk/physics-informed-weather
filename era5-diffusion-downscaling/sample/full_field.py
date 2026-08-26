@@ -136,7 +136,8 @@ def _project_final(out: torch.Tensor, coarse_full: torch.Tensor, ratio: int) -> 
 def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, ratio,
                                      recon_cfg, eta=0.0, tile=128, overlap=32,
                                      batch=8, geo_full=None, project_steps=False,
-                                     project_final=True, generator=None):
+                                     project_final=True, generator=None,
+                                     covariance_projector=None):
     """Tiled guided-diffusion reconstruction of one full field.
 
     lf_full: (1, C, H, W) noise-mixing guidance (globally degraded, normalized);
@@ -144,9 +145,22 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
     mixing epsilon is cropped per tile from a global noise field. With
     project_steps=True the per-step ILVR projection also runs inside every
     tile (tile origins are ratio-aligned, so tile observations are exact crops
-    of the global one)."""
+    of the global one).
+
+    `covariance_projector` swaps that per-step projection for the Weather-DDNM
+    covariance-aware one. It applies HERE (and not in the fused sampler)
+    because tiles carry the patch geometry the covariance was estimated on;
+    the projector validates the grid and raises if they disagree. The final
+    global projection stays ordinary — it is a whole-field operator."""
     K = int(recon_cfg["K"])
     noise_full = _global_noise((K, *lf_full.shape), lf_full, generator)
+    if covariance_projector is not None:
+        if not project_steps:
+            raise ValueError("covariance_projector requires project_steps=True")
+        if tuple(covariance_projector.image_size) != (tile, tile):
+            raise ValueError(
+                f"covariance grid {covariance_projector.image_size} != tile "
+                f"{(tile, tile)}: estimate the covariance at the tile size")
 
     def fn(origins):
         x_g = crop_tiles(lf_full, origins, tile)
@@ -155,7 +169,8 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
         lf_tiles = _crop_coarse(coarse_full, origins, tile, ratio) if project_steps else None
         return diffusion.guided_reconstruct(
             model, x_g, t_steps=recon_cfg["t_steps"], K=K, eta=eta, cond=coords,
-            project=project_steps, lf=lf_tiles, ratio=ratio, init_noise=eps)
+            project=project_steps, lf=lf_tiles, ratio=ratio, init_noise=eps,
+            covariance_projector=covariance_projector)
 
     out = stitch_tiles(fn, lf_full, tile, overlap, align=ratio, batch=batch)
     return _project_final(out, coarse_full, ratio) if project_final else out

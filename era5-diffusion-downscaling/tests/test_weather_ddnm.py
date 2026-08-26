@@ -89,6 +89,42 @@ class WeatherDDNMTests(unittest.TestCase):
             atol=2e-6, rtol=2e-6))
 
 
+class TiledIntegrationTests(unittest.TestCase):
+    """Weather-DDNM inside the tiled full-field sampler."""
+
+    def test_tiled_reconstruction_stays_coarse_consistent(self):
+        from sample.full_field import reconstruct_full_tiled_diffusion
+
+        class ZeroNoise(nn.Module):
+            def forward(self, x, timestep, cond=None):
+                return torch.zeros_like(x)
+
+        torch.manual_seed(3)
+        tile, ratio = 16, 4
+        projector = SpectralCovarianceProjector(
+            0.1 + torch.rand(1, tile, tile // 2 + 1), (tile, tile))
+        coarse_full = torch.randn(1, 1, 32 // ratio, 48 // ratio)
+        lf_full = upsample_nearest(coarse_full, (32, 48))
+        out = reconstruct_full_tiled_diffusion(
+            GaussianDiffusion(timesteps=4), ZeroNoise(), lf_full, coarse_full,
+            ratio, {"K": 1, "t_steps": [2]}, tile=tile, overlap=8, batch=4,
+            project_steps=True, covariance_projector=projector)
+        self.assertEqual(out.shape, lf_full.shape)
+        self.assertTrue(torch.allclose(coarsen(out, ratio), coarse_full,
+                                       atol=1e-5, rtol=1e-5))
+
+    def test_grid_mismatch_is_rejected(self):
+        from sample.full_field import reconstruct_full_tiled_diffusion
+        projector = SpectralCovarianceProjector(torch.ones(1, 16, 9), (16, 16))
+        coarse_full = torch.randn(1, 1, 8, 8)
+        with self.assertRaises(ValueError):   # tile 32 != covariance grid 16
+            reconstruct_full_tiled_diffusion(
+                GaussianDiffusion(timesteps=4), nn.Identity(),
+                upsample_nearest(coarse_full, (32, 32)), coarse_full, 4,
+                {"K": 1, "t_steps": [2]}, tile=32, project_steps=True,
+                covariance_projector=projector)
+
+
 class LocalizationTests(unittest.TestCase):
     """Gaspari-Cohn tapering of the covariance kernel (periodicity fix)."""
 
