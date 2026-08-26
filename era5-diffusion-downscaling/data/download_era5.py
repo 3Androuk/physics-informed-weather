@@ -230,6 +230,14 @@ def main():
                     help="fields fetched (and retried) per batch within a year.")
     ap.add_argument("--max-retries", type=int, default=6,
                     help="retries per batch before giving up.")
+    ap.add_argument("--dask-threads", type=int, default=4,
+                    help="Cap dask's worker threads. CRITICAL on a big shared "
+                         "node: dask sizes its default pool to the CPU count, "
+                         "and a BriCS login node reports 288 cores. Each thread "
+                         "can hold a 51.5 MiB pressure-level chunk in flight, so "
+                         "the default pool blows straight through the 4 GiB "
+                         "per-user cgroup cap. 4 keeps enough parallelism to "
+                         "saturate the link without hoarding chunks.")
     ap.add_argument("--keep-cache", action="store_true",
                     help="keep the per-year datasets/raw/_years/ files after merging.")
     ap.add_argument("--years", default=None,
@@ -247,6 +255,11 @@ def main():
     if args.years:
         only_years = {int(y) for y in args.years.replace(" ", "").split(",") if y}
 
+    # Must happen before the first dask-backed read; see --dask-threads.
+    import dask
+    dask.config.set(scheduler="threads", num_workers=args.dask_threads)
+    dask.config.set({"array.chunk-size": "32MiB"})
+
     cfg = load_config(args.config)
     dcfg = cfg["data"]
     stride = dcfg.get("time_stride", 1)
@@ -259,7 +272,8 @@ def main():
     labels = channel_labels(dcfg)
     print(f"Opening {dcfg['era5_zarr']}\n  channels ({len(labels)}): {', '.join(labels)}\n"
           f"  per-year | timeout={args.timeout}s | "
-          f"chunk_time={args.chunk_time} | batch={args.batch} | retries={args.max_retries}",
+          f"chunk_time={args.chunk_time} | batch={args.batch} | "
+          f"retries={args.max_retries} | dask_threads={args.dask_threads}",
           flush=True)
 
     splits = {

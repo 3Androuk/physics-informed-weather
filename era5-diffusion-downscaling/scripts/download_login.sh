@@ -22,7 +22,7 @@
 # your last SSH session closes. Keep a session open for the duration, or rerun
 # this script — it resumes from the last completed year.
 #
-# Env overrides: ERA5_VENV (default ./.venv), BATCH (8), CHUNK_TIME (4),
+# Env overrides: ERA5_VENV (default ./.venv), BATCH (4), CHUNK_TIME (4), DASK_THREADS (4),
 # TIMEOUT (120), RETRIES (8).
 set -uo pipefail
 
@@ -62,20 +62,22 @@ run_one() {   # $1 = --years argument, or empty for the final merge pass
     local sel=("$@")
     python -u -m data.download_era5 \
         --config "$CONFIG" \
-        --batch "${BATCH:-8}" \
+        --batch "${BATCH:-4}" \
         --chunk-time "${CHUNK_TIME:-4}" \
         --timeout "${TIMEOUT:-120}" \
         --max-retries "${RETRIES:-8}" \
+        --dask-threads "${DASK_THREADS:-4}" \
         "${sel[@]}"
 }
 
 for y in "${YEARS[@]}"; do
     echo "[download] ===== year $y ====="
     for attempt in 1 2 3; do
-        if run_one --years "$y"; then
-            break
-        fi
+        # Capture the status directly: after `if cmd; then ...; fi` with no else,
+        # $? is the `if` statement's own 0, not the command's.
+        run_one --years "$y"
         rc=$?
+        [[ $rc -eq 0 ]] && break
         echo "[download] year $y exited $rc (137 = OOM-killed) — attempt $attempt/3"
         if [[ $attempt -eq 3 ]]; then
             echo "[download] giving up on $y; rerun the script to retry" >&2
