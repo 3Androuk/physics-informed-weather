@@ -45,6 +45,20 @@ def _parser(method: str):
                          "ratio-randomized regression mean (meanmap*.pt from "
                          "train_directmap --random-ratio). Implies --residual; the "
                          "checkpoint stem gains an _lm suffix and remembers the mean.")
+    ap.add_argument("--consistent-mean", action="store_true",
+                    help="Project the (bicubic or learned) mean onto the "
+                         "constraint set {x: coarsen(x)=y} before forming the "
+                         "residual. Provably cannot worsen the mean (orthogonal "
+                         "projection, Pythagoras) and puts the residual target "
+                         "exactly in ker A. Stem gains _cm. Implied by "
+                         "--null-space.")
+    ap.add_argument("--null-space", action="store_true",
+                    help="Data-consistent residual transport: restrict source, "
+                         "bridge noise, velocity, and every sampler step to "
+                         "ker A, so coarsen(mean + residual) == y holds "
+                         "STRUCTURALLY for any network at any step count. "
+                         "Implies --residual and --consistent-mean; stem gains "
+                         "_ns.")
     return ap
 
 
@@ -83,7 +97,11 @@ def run(method: str):
     # ── Residual mode: transport (y - mean)/res_std, conditioned on the mean.
     # The mean may be geo-conditioned even when the transport model is not, in
     # which case coords are still needed to evaluate it.
+    if args.null_space:
+        args.residual = args.consistent_mean = True
     residual_mode = args.residual or args.mean_ckpt is not None
+    if args.consistent_mean and not residual_mode:
+        raise SystemExit("--consistent-mean only applies to residual mode")
     mean_cfg, mean_geo = None, False
     if args.mean_ckpt:
         from sample.reconstruct import load_directmap  # noqa: PLC0415
@@ -103,6 +121,16 @@ def run(method: str):
             lo = coarsen(y, r)
             return torch.nn.functional.interpolate(
                 lo, size=y.shape[-2:], mode="bicubic", align_corners=False)
+
+    if args.consistent_mean:
+        _raw_mean_fn = mean_fn
+
+        def mean_fn(y, r, coords=None):
+            # m = mu + A+(y_coarse - A mu): exact for block-average A, so the
+            # residual y - m has zero block means (it lies in ker A).
+            from models.transport import project_data_consistency
+            return project_data_consistency(_raw_mean_fn(y, r, coords),
+                                            coarsen(y, r), r)
 
     if args.mean_ckpt and mean_geo and geo_on:
         assert (mean_cfg["geo"].get("encoder", "hash")
@@ -148,7 +176,9 @@ def run(method: str):
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     stem = _checkpoint_stem(method, cfg, args.seed is not None,
-                            residual_mode, args.mean_ckpt is not None)
+                            residual_mode, args.mean_ckpt is not None,
+                            consistent_mean=args.consistent_mean,
+                            null_space=args.null_space)
     ckpt_path = ckpt_dir / f"{stem}.pt"
     start_epoch, step = 1, 0
     if args.resume and ckpt_path.exists():
@@ -207,7 +237,8 @@ def run(method: str):
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 result = process.training_loss(
-                    model, train_target, cond_field, coords, return_details=True)
+                    model, train_target, cond_field, coords, return_details=True,
+                    null_ratio=ratio if args.null_space else None)
                 loss, _, _, *extra = result
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -256,7 +287,7 @@ def run(method: str):
         if val_loader is not None:
             epoch_metrics.update(_validate(
                 process, ema.shadow, val_loader, device, need_coords, ratios,
-                residual_mode, mean_fn, res_std))
+                residual_mode, mean_fn, res_std, null_space=args.null_space))
             vals = " | ".join(f"{k} {v:.5f}" for k, v in epoch_metrics.items()
                               if k.startswith("val/"))
             print(f"epoch {epoch:03d} done | {vals}")
@@ -269,7 +300,7 @@ def run(method: str):
             sample_metrics = _save_samples(
                 process, ema.shadow, val_loader.dataset, normalizer, device,
                 need_coords, cfg, method, sample_path,
-                residual_mode, mean_fn, res_std)
+                residual_mode, mean_fn, res_std, null_space=args.null_space)
             _log_metrics(sample_metrics, step, writer, wb_run)
             if wb_run is not None:
                 wb_run.log({"samples/reconstructions": wandb.Image(str(sample_path))}, step=step)
@@ -279,7 +310,8 @@ def run(method: str):
                 raise RuntimeError("non-finite transport weights; checkpoint not overwritten")
             _save_checkpoint(ckpt_path, model, ema, optimizer, scaler, cfg,
                              normalizer, method, epoch, step,
-                             residual_mode, res_std, args.mean_ckpt)
+                             residual_mode, res_std, args.mean_ckpt,
+                             args.consistent_mean, args.null_space)
 
     if writer:
         writer.close()
@@ -328,7 +360,8 @@ def _move_batch(batch, need_coords, device):
 
 @torch.no_grad()
 def _validate(process, model, loader, device, need_coords, ratios,
-              residual_mode=False, mean_fn=None, res_std=1.0):
+              residual_mode=False, mean_fn=None, res_std=1.0,
+              null_space=False):
     was_training = model.training
     model.eval()
     totals = {r: 0.0 for r in ratios}
@@ -346,7 +379,9 @@ def _validate(process, model, loader, device, need_coords, ratios,
                     tgt = (target - cond_field) / res_std
                 else:
                     cond_field, tgt = degrade(target, ratio), target
-                loss = process.training_loss(model, tgt, cond_field, coords)
+                loss = process.training_loss(
+                    model, tgt, cond_field, coords,
+                    null_ratio=ratio if null_space else None)
                 totals[ratio] += loss.item() * target.shape[0]
             count += target.shape[0]
     if was_training:
@@ -357,7 +392,7 @@ def _validate(process, model, loader, device, need_coords, ratios,
 @torch.no_grad()
 def _save_samples(process, model, subset, normalizer, device, geo_on,
                   cfg, method, path, residual_mode=False, mean_fn=None,
-                  res_std=1.0):
+                  res_std=1.0, null_space=False):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -380,7 +415,8 @@ def _save_samples(process, model, subset, normalizer, device, geo_on,
             if residual_mode:
                 mean_f = mean_fn(y, ratio, c)
                 rec = mean_f + res_std * _sample(process, model, mean_f, c,
-                                                 coarse, ratio, cfg, method)
+                                                 coarse, ratio, cfg, method,
+                                                 null_ratio=ratio if null_space else None)
             else:
                 rec = _sample(process, model, low_res, c, coarse, ratio, cfg, method)
             recs.append((rec, y))
@@ -408,12 +444,13 @@ def _save_samples(process, model, subset, normalizer, device, geo_on,
     return {"samples/spectrum_log_l1": spectrum_log_l1(pred_phys, truth_phys)}
 
 
-def _sample(process, model, low_res, coords, coarse, ratio, cfg, method):
+def _sample(process, model, low_res, coords, coarse, ratio, cfg, method,
+            null_ratio=None):
     tc = cfg.get("transport", {})
     common = dict(
         coords=coords, steps=tc.get("sample_steps", 100),
         solver=tc.get("solver", "heun"), project=tc.get("projection", "final"),
-        coarse=coarse, ratio=ratio,
+        coarse=coarse, ratio=ratio, null_ratio=null_ratio,
     )
     if method == "stochastic_interpolant":
         si = tc.get("stochastic_interpolant", {})
@@ -423,10 +460,15 @@ def _sample(process, model, low_res, coords, coarse, ratio, cfg, method):
 
 
 def _checkpoint_stem(method, cfg, seed_overridden, residual_mode=False,
-                     learned_mean=False):
+                     learned_mean=False, consistent_mean=False,
+                     null_space=False):
     stem = "flow_matching" if method == "flow" else "stochastic_interpolant"
     if residual_mode:
         stem += "_res"
+    if null_space:
+        stem += "_ns"          # implies the consistent mean; _cm not repeated
+    elif consistent_mean:
+        stem += "_cm"
     stem += geo_suffix(cfg)
     if learned_mean:
         stem += "_lm"
@@ -450,7 +492,8 @@ def _weights_finite(model):
 
 def _save_checkpoint(path, model, ema, optimizer, scaler, cfg,
                      normalizer, method, epoch, step,
-                     residual_mode=False, res_std=1.0, mean_ckpt=None):
+                     residual_mode=False, res_std=1.0, mean_ckpt=None,
+                     consistent_mean=False, null_space=False):
     tmp = path.with_suffix(".pt.tmp")
     torch.save({
         "model": model.state_dict(), "ema": ema.state_dict(),
@@ -461,5 +504,8 @@ def _save_checkpoint(path, model, ema, optimizer, scaler, cfg,
         # Residual mode needs both to reconstruct: the scale the residual was
         # normalized by, and which frozen mean it was trained against.
         "residual": residual_mode, "res_std": res_std, "mean_ckpt": mean_ckpt,
+        # Sampling must mirror training: project the mean the same way, and
+        # keep the whole trajectory in ker A for null-space checkpoints.
+        "consistent_mean": consistent_mean, "null_space": null_space,
     }, tmp)
     tmp.replace(path)

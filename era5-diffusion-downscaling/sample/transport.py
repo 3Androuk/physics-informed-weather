@@ -39,20 +39,33 @@ def load_transport(ckpt_path, device, use_ema=True):
                     "mean_model": mean_model, "mean_geo": mean_geo,
                     # Exposed so callers can build the coords payload the mean
                     # needs when the transport model itself is not geo-conditioned.
-                    "mean_geo_cfg": mean_cfg["geo"] if mean_geo else None}
+                    "mean_geo_cfg": mean_cfg["geo"] if mean_geo else None,
+                    # Sampling mirrors training: project the mean identically,
+                    # and stay in ker A for null-space checkpoints.
+                    "consistent_mean": ck.get("consistent_mean", False),
+                    "null_space": ck.get("null_space", False)}
     return model, build_transport(cfg, method), cfg, method, residual
 
 
 @torch.no_grad()
 def _mean_field(hf_norm, ratio, coords, residual):
-    """Deterministic mean: frozen learned regression, or bicubic."""
+    """Deterministic mean: frozen learned regression, or bicubic.
+
+    consistent_mean checkpoints project it onto {x: coarsen(x) == observation}
+    — the orthogonal projection m = mu + A+(y - A mu), which cannot increase
+    the mean's error and matches how the residual target was formed."""
     if residual["mean_model"] is not None:
         x = degrade(hf_norm, ratio)
         m = residual["mean_model"]
-        return m(x, None, coords) if residual["mean_geo"] else m(x)
-    lo = coarsen(hf_norm, ratio)
-    return torch.nn.functional.interpolate(
-        lo, size=hf_norm.shape[-2:], mode="bicubic", align_corners=False)
+        mean = m(x, None, coords) if residual["mean_geo"] else m(x)
+    else:
+        lo = coarsen(hf_norm, ratio)
+        mean = torch.nn.functional.interpolate(
+            lo, size=hf_norm.shape[-2:], mode="bicubic", align_corners=False)
+    if residual.get("consistent_mean"):
+        from models.transport import project_data_consistency
+        mean = project_data_consistency(mean, coarsen(hf_norm, ratio), ratio)
+    return mean
 
 
 @torch.no_grad()
@@ -72,6 +85,15 @@ def reconstruct_transport(model, process, hf_norm, ratio, cfg, method,
     if residual is not None:
         cond_field = _mean_field(hf_norm, ratio, coords, residual)
         compose, project = project, "none"
+        if residual.get("null_space"):
+            # Consistency of the composite is structural (mean is consistent,
+            # residual stays in ker A); the final compose projection remains
+            # only as float-roundoff cleanup.
+            kwargs_null = ratio
+        else:
+            kwargs_null = None
+    else:
+        kwargs_null = None
 
     kwargs = dict(
         coords=coords,
@@ -80,6 +102,7 @@ def reconstruct_transport(model, process, hf_norm, ratio, cfg, method,
         project=project,
         coarse=coarse,
         ratio=ratio,
+        null_ratio=kwargs_null,
     )
     if method == "stochastic_interpolant":
         si = tc.get("stochastic_interpolant", {})

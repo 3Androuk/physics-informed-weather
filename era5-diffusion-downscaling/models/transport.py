@@ -92,12 +92,22 @@ class FlowMatching:
             raise ValueError("time_epsilon must be in [0, 0.5)")
 
     def training_loss(self, model: nn.Module, target: torch.Tensor,
-                      low_res: torch.Tensor, coords=None, return_details=False):
+                      low_res: torch.Tensor, coords=None, return_details=False,
+                      null_ratio: int | None = None):
+        """`null_ratio` restricts the flow to ker A (null-space mode): the
+        source and the regressed velocity are both projected, so the entire
+        path lives in the subspace the observation leaves free. The target
+        must already satisfy coarsen(target, null_ratio) == 0 — the trainer
+        guarantees this by using a consistency-projected mean."""
         t = _batch_time(target, self.time_epsilon)
         z = torch.randn_like(target)
+        if null_ratio is not None:
+            z = nullspace_project(z, null_ratio)
         xt = (1.0 - _expand(t)) * z + _expand(t) * target
         velocity = target - z
         pred = model(xt, t, (low_res, coords))
+        if null_ratio is not None:
+            pred = nullspace_project(pred, null_ratio)
         per_sample = (pred - velocity).float().pow(2).mean(dim=(1, 2, 3))
         loss = per_sample.mean()
         return (loss, per_sample.detach(), t.detach()) if return_details else loss
@@ -106,9 +116,10 @@ class FlowMatching:
     def sample(self, model: nn.Module, low_res: torch.Tensor, coords=None,
                steps: int = 100, solver: str = "heun", project: str = "none",
                coarse: torch.Tensor | None = None, ratio: int | None = None,
-               noise: torch.Tensor | None = None):
+               noise: torch.Tensor | None = None, null_ratio: int | None = None):
         return integrate_transport(model, low_res, coords, steps, solver,
-                                   project, coarse, ratio, noise=noise)
+                                   project, coarse, ratio, noise=noise,
+                                   null_ratio=null_ratio)
 
 
 class StochasticInterpolant:
@@ -132,8 +143,14 @@ class StochasticInterpolant:
         if not 0.0 <= self.time_epsilon < 0.5:
             raise ValueError("time_epsilon must be in [0, 0.5)")
 
-    def path(self, target: torch.Tensor, t: torch.Tensor):
+    def path(self, target: torch.Tensor, t: torch.Tensor,
+             null_ratio: int | None = None):
         z, eps = torch.randn_like(target), torch.randn_like(target)
+        if null_ratio is not None:
+            # Null-space mode: source AND bridge noise live in ker A, so every
+            # intermediate interpolant does too (the target already does).
+            z = nullspace_project(z, null_ratio)
+            eps = nullspace_project(eps, null_ratio)
         te = _expand(t)
         bridge = self.gamma * torch.sin(math.pi * te)
         bridge_dot = self.gamma * math.pi * torch.cos(math.pi * te)
@@ -145,10 +162,16 @@ class StochasticInterpolant:
         return xt, velocity, scaled_score
 
     def training_loss(self, model: nn.Module, target: torch.Tensor,
-                      low_res: torch.Tensor, coords=None, return_details=False):
+                      low_res: torch.Tensor, coords=None, return_details=False,
+                      null_ratio: int | None = None):
         t = _batch_time(target, self.time_epsilon)
-        xt, velocity, scaled_score = self.path(target, t)
+        xt, velocity, scaled_score = self.path(target, t, null_ratio=null_ratio)
         pred_v, pred_s = model(xt, t, (low_res, coords)).chunk(2, dim=1)
+        if null_ratio is not None:
+            # Both regression targets are in ker A; project the heads so the
+            # network is only scored (and only acts) inside it.
+            pred_v = nullspace_project(pred_v, null_ratio)
+            pred_s = nullspace_project(pred_s, null_ratio)
         v_per = (pred_v - velocity).float().pow(2).mean(dim=(1, 2, 3))
         s_per = (pred_s - scaled_score).float().pow(2).mean(dim=(1, 2, 3))
         per_sample = v_per + self.score_weight * s_per
@@ -167,18 +190,18 @@ class StochasticInterpolant:
                steps: int = 100, solver: str = "heun", sampler: str = "ode",
                stochasticity: float = 0.1, project: str = "none",
                coarse: torch.Tensor | None = None, ratio: int | None = None,
-               noise: torch.Tensor | None = None):
+               noise: torch.Tensor | None = None, null_ratio: int | None = None):
         if sampler == "ode":
             return integrate_transport(model, low_res, coords, steps, solver,
                                        project, coarse, ratio, split_velocity=True,
-                                       noise=noise)
+                                       noise=noise, null_ratio=null_ratio)
         if sampler != "sde":
             raise ValueError("sampler must be 'ode' or 'sde'")
         return self._sample_sde(model, low_res, coords, steps, stochasticity,
-                                project, coarse, ratio, noise)
+                                project, coarse, ratio, noise, null_ratio)
 
     def _sample_sde(self, model, low_res, coords, steps, stochasticity,
-                    project, coarse, ratio, noise=None):
+                    project, coarse, ratio, noise=None, null_ratio=None):
         _validate_sampling(steps, "euler", project, coarse, ratio)
         if stochasticity < 0:
             raise ValueError("stochasticity must be non-negative")
@@ -186,6 +209,8 @@ class StochasticInterpolant:
         # per-step dW increments stay independent (overlap-blending averages
         # the residual disagreement).
         x = _initial_noise(low_res, noise)
+        if null_ratio is not None:
+            x = nullspace_project(x, null_ratio)
         dt = 1.0 / steps
         for i in range(steps):
             t_value = i / steps
@@ -196,9 +221,16 @@ class StochasticInterpolant:
             # lambda(t) vanishes at both endpoints.  Adding lambda*score to the
             # probability-flow drift and sqrt(2 lambda)dW preserves marginals.
             rate = float(stochasticity) * 4.0 * t_value * (1.0 - t_value)
-            x = x + dt * (pred_v + rate * score)
+            drift = pred_v + rate * score
+            if null_ratio is not None:
+                drift = nullspace_project(drift, null_ratio)
+            x = x + dt * drift
             if rate > 0:
-                x = x + math.sqrt(2.0 * rate * dt) * torch.randn_like(x)
+                dw = math.sqrt(2.0 * rate * dt) * torch.randn_like(x)
+                if null_ratio is not None:
+                    # Null-space Brownian motion: P dW keeps AR(t) = 0 exactly.
+                    dw = nullspace_project(dw, null_ratio)
+                x = x + dw
             if project == "each":
                 x = project_data_consistency(x, coarse, ratio)
         if project == "final":
@@ -238,21 +270,35 @@ def integrate_transport(model: nn.Module, low_res: torch.Tensor, coords=None,
                         steps: int = 100, solver: str = "heun",
                         project: str = "none", coarse=None, ratio=None,
                         split_velocity: bool = False,
-                        noise: torch.Tensor | None = None):
-    """Euler/Heun integration of a learned probability-flow ODE, t=0 -> 1."""
+                        noise: torch.Tensor | None = None,
+                        null_ratio: int | None = None):
+    """Euler/Heun integration of a learned probability-flow ODE, t=0 -> 1.
+
+    With `null_ratio`, the initial state and every velocity evaluation are
+    projected onto ker A, so A x(t) = 0 holds along the whole trajectory for
+    ANY network — data consistency of the composed field is then structural,
+    not imposed. (P is linear, so projecting v0 and v1 separately equals
+    projecting the Heun average.)"""
     _validate_sampling(steps, solver, project, coarse, ratio)
     x = _initial_noise(low_res, noise)
+    if null_ratio is not None:
+        x = nullspace_project(x, null_ratio)
     dt = 1.0 / steps
     cond = (low_res, coords)
+
+    def vel(state, t):
+        v = _velocity(model, state, t, cond, split_velocity)
+        return nullspace_project(v, null_ratio) if null_ratio is not None else v
+
     for i in range(steps):
         t0 = torch.full((x.shape[0],), i / steps, device=x.device, dtype=x.dtype)
-        v0 = _velocity(model, x, t0, cond, split_velocity)
+        v0 = vel(x, t0)
         if solver == "euler":
             x = x + dt * v0
         else:
             proposal = x + dt * v0
             t1 = torch.full_like(t0, (i + 1) / steps)
-            v1 = _velocity(model, proposal, t1, cond, split_velocity)
+            v1 = vel(proposal, t1)
             x = x + 0.5 * dt * (v0 + v1)
         if project == "each":
             x = project_data_consistency(x, coarse, ratio)
@@ -265,6 +311,18 @@ def project_data_consistency(x: torch.Tensor, coarse: torch.Tensor,
                              ratio: int) -> torch.Tensor:
     """Exact block-average projection: coarsen(output, ratio) == observation."""
     return x + upsample_nearest(coarse - coarsen(x, ratio), x.shape[-2:])
+
+
+def nullspace_project(x: torch.Tensor, ratio: int) -> torch.Tensor:
+    """P = I - A†A for the block-average observation A: zero the block means.
+
+    P is the orthogonal projector onto ker A, the subspace of fields whose
+    r x r block averages all vanish — exactly the directions the observation
+    Y = AX leaves undetermined. For block averaging, A†A x is simply the
+    nearest-upsampled block-mean field, so P x = x - blockmeans(x): one
+    subtraction, no solve. P is exact (AP = 0 to float roundoff), symmetric,
+    and idempotent."""
+    return x - upsample_nearest(coarsen(x, ratio), x.shape[-2:])
 
 
 def build_transport(cfg: dict, method: str):

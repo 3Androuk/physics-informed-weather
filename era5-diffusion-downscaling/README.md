@@ -57,6 +57,39 @@ Both samplers optionally apply an exact final block-average projection so the
 generated field coarsens back to the observed input. The default training ratios
 are `{2, 4, 8}` and the default evaluation also includes held-out `16×`.
 
+### Null-space residual transport (`--null-space`)
+
+Because the coarse input is generated exactly (`y = Ax`, block averaging), the
+ideal CorrDiff-style decomposition has a special structure: the conditional
+mean satisfies `A mu(y) = y`, so ALL posterior uncertainty lives in `ker A` —
+the subspace the observation leaves free. Two flags exploit this on the
+residual transports:
+
+- `--consistent-mean`: project the (bicubic or learned) mean onto
+  `{x: Ax = y}` before forming the residual, `m = mu + A†(y - A mu)`. An
+  orthogonal projection, so by Pythagoras it can only reduce the mean's error;
+  the residual target then lies exactly in `ker A`. Stem gains `_cm`.
+- `--null-space` (implies the above): source noise, interpolant bridge,
+  velocity output, and every sampler step (ODE and SDE) are projected by
+  `P = I - A†A` — for block averaging just "subtract the block means", one
+  line. The whole trajectory then stays in `ker A`, so
+  `coarsen(mean + res_std * R) == y` holds STRUCTURALLY — for any network,
+  any step count, every ensemble member — with no data-fidelity correction.
+  At the population optimum the flow samples the exact posterior
+  `p(X | Y=y)`; with an imperfect network the posterior error is bounded by
+  velocity-regression error plus solver error (Wasserstein-2), while
+  measurement consistency stays exactly zero. Stem gains `_ns`.
+
+```bash
+python -m train.train_flow_matching --config config/t2m.yaml --null-space \
+    --mean-ckpt meanmap.pt --wandb        # -> flow_matching_res_ns_lm.pt
+python -m eval.compare_transports --config config/t2m.yaml   # loads flags from ckpt
+```
+
+Sampling mirrors training automatically: the checkpoint stores both flags, the
+mean is projected identically at eval, and the composite needs no final
+projection (it is kept only as float-roundoff cleanup).
+
 ## Weather-covariance-aware DDNM (T2M)
 
 The guided diffusion sampler also supports an inference-only Weather-DDNM
@@ -348,6 +381,18 @@ Headline table: rows `{4× in-dist, 8× out-of-dist}` × columns
   and three dimensions.* QJRMS 125, 723 — the compactly-supported localization
   kernel used to keep the periodic covariance embedding from wrapping
   corrections across a patch edge.
+
+**Null-space residual transport:**
+- Albergo, M.S., Boffi, N.M., Vanden-Eijnden, E. (2025). *Stochastic
+  Interpolants: A Unifying Framework for Flows and Diffusions.* JMLR 26 —
+  the exact finite-time endpoint construction the residual flow relies on.
+- NullFlow (2026). *Flow matching in the null space of a linear operator.*
+  arXiv:2606.22696 — direct precedent for the broad null-space flow idea; the
+  weather-specific parts here are the CorrDiff residual derivation, the exact
+  block-average projector, and the consistency-projected mean.
+- Benton, J., Deligiannidis, G., Doucet, A. (2023). *Error Bounds for Flow
+  Matching Methods.* arXiv:2305.16860 — the Wasserstein posterior-error bound
+  under imperfect velocity regression.
 
 **Residual (split-model) diffusion:**
 - Mardani, M., et al. (2025). *Residual corrective diffusion modeling for
