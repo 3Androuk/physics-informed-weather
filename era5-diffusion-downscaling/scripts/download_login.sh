@@ -7,17 +7,24 @@
 # would hold GPUs — billed in node-hours — while doing nothing but wait on the
 # network. Login nodes are not a Slurm allocation, so they should not be billed
 # at all (worth confirming against the project balance the first time). They do
-# cap each user at ~4 GiB RAM, which is why the flags below keep the footprint
-# small: data.download_era5 streams each batch straight into an on-disk memmap
-# (~0.8 GiB peak at --batch 16), rather than buffering a whole year (~19 GiB at
-# 20 channels, which the cap would kill).
+# cap each user at 4 GiB RAM (cgroup MemoryMax, measured), which shapes
+# everything below.
 #
-# Resumable: each year is cached separately and a rerun skips finished years,
-# so just run it again if the link drops.
+# ONE PROCESS PER YEAR. fsspec keeps filesystem instances and block caches
+# globally, so a single long-lived process creeps upward in RSS across years and
+# is eventually OOM-killed (observed: 2007 completed, 2008 died 48/366 in, exit
+# 137). A fresh process per year resets that, and because each year is cached on
+# completion nothing in flight is ever lost. The merge runs on the final pass,
+# once every configured year is on disk.
 #
-# Env overrides: ERA5_VENV (default ./.venv), BATCH (16), CHUNK_TIME (4),
+# NOTE: there is no tmux or screen on these login nodes, and `loginctl
+# enable-linger` is denied, so a detached nohup/setsid process is reaped when
+# your last SSH session closes. Keep a session open for the duration, or rerun
+# this script — it resumes from the last completed year.
+#
+# Env overrides: ERA5_VENV (default ./.venv), BATCH (8), CHUNK_TIME (4),
 # TIMEOUT (120), RETRIES (8).
-set -euo pipefail
+set -uo pipefail
 
 CONFIG=${1:?usage: $0 <config yaml>   e.g. config/wb2_20var.yaml}
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,12 +36,54 @@ if [[ -f "$VENV/bin/activate" ]]; then
     source "$VENV/bin/activate"
 fi
 
-echo "[download] $CONFIG on $(hostname) — login node, no node-hours charged"
-echo "[download] run under tmux/screen; it is resumable if it drops"
+# Configured years, in order, from the config itself.
+mapfile -t YEARS < <(python - "$CONFIG" <<'PY'
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path.cwd()))
+from utils import load_config
+d = load_config(sys.argv[1])["data"]
+ys = []
+for key in ("train_years", "test_years"):
+    lo, hi = d[key]
+    ys += list(range(lo, hi + 1))
+print("\n".join(str(y) for y in sorted(set(ys))))
+PY
+)
 
-exec python -m data.download_era5 \
-    --config "$CONFIG" \
-    --batch "${BATCH:-16}" \
-    --chunk-time "${CHUNK_TIME:-4}" \
-    --timeout "${TIMEOUT:-120}" \
-    --max-retries "${RETRIES:-8}"
+if [[ ${#YEARS[@]} -eq 0 ]]; then
+    echo "[download] could not read years from $CONFIG" >&2
+    exit 1
+fi
+
+echo "[download] $CONFIG on $(hostname) — login node, no node-hours charged"
+echo "[download] ${#YEARS[@]} years, one process each: ${YEARS[*]}"
+
+run_one() {   # $1 = --years argument, or empty for the final merge pass
+    local sel=("$@")
+    python -u -m data.download_era5 \
+        --config "$CONFIG" \
+        --batch "${BATCH:-8}" \
+        --chunk-time "${CHUNK_TIME:-4}" \
+        --timeout "${TIMEOUT:-120}" \
+        --max-retries "${RETRIES:-8}" \
+        "${sel[@]}"
+}
+
+for y in "${YEARS[@]}"; do
+    echo "[download] ===== year $y ====="
+    for attempt in 1 2 3; do
+        if run_one --years "$y"; then
+            break
+        fi
+        rc=$?
+        echo "[download] year $y exited $rc (137 = OOM-killed) — attempt $attempt/3"
+        if [[ $attempt -eq 3 ]]; then
+            echo "[download] giving up on $y; rerun the script to retry" >&2
+            exit "$rc"
+        fi
+        sleep 10
+    done
+done
+
+echo "[download] ===== all years cached; merging ====="
+run_one

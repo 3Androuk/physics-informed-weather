@@ -232,7 +232,20 @@ def main():
                     help="retries per batch before giving up.")
     ap.add_argument("--keep-cache", action="store_true",
                     help="keep the per-year datasets/raw/_years/ files after merging.")
+    ap.add_argument("--years", default=None,
+                    help="Comma-separated years to fetch this run (e.g. 2007,2008); "
+                         "default is every configured year. Use ONE YEAR PER "
+                         "PROCESS on a memory-capped host: fsspec keeps filesystem "
+                         "instances and block caches globally, so RSS creeps up "
+                         "across years and a long-lived process is eventually "
+                         "OOM-killed. A fresh process per year resets that, and no "
+                         "in-flight year is ever lost. The merge runs automatically "
+                         "once every configured year is cached.")
     args = ap.parse_args()
+
+    only_years = None
+    if args.years:
+        only_years = {int(y) for y in args.years.replace(" ", "").split(",") if y}
 
     cfg = load_config(args.config)
     dcfg = cfg["data"]
@@ -261,6 +274,8 @@ def main():
             if ypath.exists():
                 print(f"[skip] {split} {year} already cached", flush=True)
                 continue
+            if only_years is not None and year not in only_years:
+                continue
             # Streamed straight into the .tmp memmap, then renamed: an
             # interrupted year leaves a .tmp that the next run overwrites,
             # never a half-written file that "resume" would trust.
@@ -279,6 +294,17 @@ def main():
         np.savez(coords_path, lat=lat, lon=lon, channels=np.array(labels))
 
     # ── Merge per-year caches into train.npy / test.npy ───────────────────
+    # Only once EVERY configured year is on disk — with --years the run is one
+    # slice of the job, and merging a partial set would silently produce a
+    # truncated train.npy.
+    missing = [f"{sp}_{y}" for sp, ys in splits.items() for y in ys
+               if not (cache_dir / f"{sp}_{y}.npy").exists()]
+    if missing:
+        print(f"Not merging yet — {len(missing)} year(s) still to fetch: "
+              f"{', '.join(missing[:6])}{' ...' if len(missing) > 6 else ''}",
+              flush=True)
+        return
+
     merged = {}
     for split, years in splits.items():
         merged[split] = _merge(cache_dir, split, years, Path(raw_dir) / f"{split}.npy")
