@@ -55,6 +55,12 @@ def main():
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
+    ap.add_argument("--resume", nargs="?", const="last.pt", default=None,
+                    help="Resume training: bare flag -> <ckpt_dir>/last.pt, or an "
+                         "explicit checkpoint path. Restores optimizer/scheduler/"
+                         "scaler state when the checkpoint has it; older model-only "
+                         "checkpoints get a fresh optimizer and a fast-forwarded "
+                         "LR schedule.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -105,13 +111,38 @@ def main():
 
     best_val = float("inf")
     step = 0  # micro-batches; the optimizer steps once every `accum` of them
+    start_epoch = 1
+    if args.resume:
+        rpath = Path(args.resume)
+        if not rpath.exists():
+            rpath = Path(ckpt_dir) / rpath
+        ckpt = torch.load(rpath, map_location="cpu", weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        start_epoch = int(ckpt["epoch"]) + 1
+        step = int(ckpt.get("step", 0))
+        if "opt" in ckpt:
+            opt.load_state_dict(ckpt["opt"])
+            if sched is not None and ckpt.get("sched") is not None:
+                sched.load_state_dict(ckpt["sched"])
+            scaler.load_state_dict(ckpt["scaler"])
+        elif sched is not None:
+            for _ in range(start_epoch - 1):  # model-only ckpt: replay the decay
+                sched.step()
+        best_val = float(ckpt.get("best_val", ckpt["val_rmse_norm"]))
+        best_path = Path(ckpt_dir) / "best.pt"
+        if best_path.exists():  # never let a resume overwrite a better best.pt
+            best_val = min(best_val, float(torch.load(
+                best_path, map_location="cpu", weights_only=False)["val_rmse_norm"]))
+        print(f"resumed {rpath}: starting epoch {start_epoch}, "
+              f"best val so far {best_val:.5f}"
+              + ("" if "opt" in ckpt else " (model-only ckpt: fresh optimizer)"))
     # Loss accumulator persists across epoch boundaries (see sibling project):
     # batches/epoch is rarely a multiple of log_every. The gradient window may
     # span an epoch boundary too when batches/epoch % accum != 0 — harmless.
     running, running_n = 0.0, 0
     t0 = time.time()
     opt.zero_grad(set_to_none=True)
-    for epoch in range(1, tc["epochs"] + 1):
+    for epoch in range(start_epoch, tc["epochs"] + 1):
         model.train()
         for y in loader:  # y: normalized HR faces (B, 12, 1, F, F)
             y = y.to(device, non_blocking=True)
@@ -161,6 +192,13 @@ def main():
             "model": model.state_dict(), "config": cfg, "epoch": epoch,
             "val_rmse_norm": val_rmse,
             "norm_mean": normalizer.mean, "norm_std": normalizer.std,
+            # Full training state so --resume continues exactly where this
+            # checkpoint left off (older checkpoints lack these keys).
+            "opt": opt.state_dict(),
+            "sched": sched.state_dict() if sched is not None else None,
+            "scaler": scaler.state_dict(),
+            "step": step,
+            "best_val": min(best_val, val_rmse),
         }
         if epoch % tc["ckpt_every_epochs"] == 0:
             _atomic_save(state, ckpt_dir / "last.pt")
