@@ -5,8 +5,12 @@ import random
 from pathlib import Path
 
 import numpy as np
-import torch
 import yaml
+
+# torch is imported lazily inside the two functions that need it. Importing it
+# at module scope costs ~0.37 GiB RSS, which data.download_era5 would pay for
+# nothing — and that matters against the 4 GiB cgroup cap on a BriCS login
+# node, where the download has no GPU work at all.
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -59,13 +63,15 @@ def apply_perf_overrides(cfg: dict, args, batch_section: str = "train") -> dict:
 
 
 def set_seed(seed: int) -> None:
+    import torch  # noqa: PLC0415 - see the module-scope note
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-def get_device() -> torch.device:
+def get_device():
+    import torch  # noqa: PLC0415 - see the module-scope note
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 

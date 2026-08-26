@@ -52,8 +52,16 @@ class BadFieldData(Exception):
 
 
 def _open_da(dcfg, lat_range, timeout, chunk_time):
-    """Open the WB2 zarr and return the configured variables stacked along a
-    'channel' dim, cropped to lat_range: (time, channel, latitude, longitude).
+    """Open the WB2 zarr and return ONE DataArray PER CHANNEL, cropped to
+    lat_range, plus the retained lat/lon vectors:
+        ([da_0, ..., da_C-1], lat, lon)   each da: (time, latitude, longitude)
+
+    Deliberately NOT concatenated along a 'channel' dim. A single `.values` on
+    a 20-variable concat makes dask materialize all 20 variables' chunks at
+    once; measured on a BriCS login node that peaked at 3.46 GiB against a
+    4 GiB cgroup cap and was OOM-killed (exit 137) even at --batch 4. Reading
+    channel by channel keeps the working set to one variable's chunks, and the
+    caller writes each straight into its slot in the on-disk memmap.
 
     A fresh handle (fresh network session) is opened on every call, so a retry
     after a stall never reuses a broken connection. Small time-chunks keep each
@@ -73,19 +81,18 @@ def _open_da(dcfg, lat_range, timeout, chunk_time):
         ds = xr.open_zarr(dcfg["era5_zarr"], chunks={"time": chunk_time},
                           storage_options=storage)
 
+    lat_all = ds["latitude"].values
+    lo, hi = lat_range
+    keep = np.where((lat_all >= lo) & (lat_all <= hi))[0]
+
     das = []
     for spec in channel_specs(dcfg):
         da = ds[spec["name"]]
         if spec["level"] is not None:  # surface variables (e.g. 2m_temperature) have no level dim
             da = da.sel(level=spec["level"])
-        das.append(da.reset_coords(drop=True))
-    da = xr.concat(das, dim="channel", coords="minimal", compat="override",
-                   combine_attrs="drop")
-    da = da.transpose("time", "channel", "latitude", "longitude")
-    lat = da["latitude"].values
-    lo, hi = lat_range
-    da = da.isel(latitude=np.where((lat >= lo) & (lat <= hi))[0])
-    return da
+        da = da.reset_coords(drop=True).isel(latitude=keep)
+        das.append(da.transpose("time", "latitude", "longitude"))
+    return das, lat_all[keep], ds["longitude"].values
 
 
 def _year_sub(da, year, stride):
@@ -114,11 +121,10 @@ def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time,
     """
     from numpy.lib.format import open_memmap
 
-    da = _open_da(dcfg, lat_range, timeout, chunk_time)
-    sub = _year_sub(da, year, stride)
-    T, C = int(sub.sizes["time"]), int(sub.sizes["channel"])
-    H, W = int(sub.sizes["latitude"]), int(sub.sizes["longitude"])
-    lat, lon = da["latitude"].values, da["longitude"].values
+    das, lat, lon = _open_da(dcfg, lat_range, timeout, chunk_time)
+    subs = [_year_sub(d, year, stride) for d in das]
+    T, C = int(subs[0].sizes["time"]), len(subs)
+    H, W = len(lat), len(lon)
 
     out = open_memmap(out_path, mode="w+", dtype=np.float32, shape=(T, C, H, W))
     n_batches = (T + batch - 1) // batch
@@ -129,29 +135,34 @@ def _download_year(dcfg, lat_range, year, stride, batch, timeout, chunk_time,
         start = 0
         while start < T:
             stop = min(start + batch, T)
-            for attempt in range(1, max_retries + 1):
-                try:
-                    chunk = sub.isel(time=slice(start, stop)).values.astype(np.float32)
-                    if not np.isfinite(chunk).all():
-                        raise BadFieldData(
-                            f"{year} fields [{start}:{stop}] contain NaN/Inf.")
-                    out[start:stop] = chunk
-                    del chunk
-                    break
-                except BadFieldData:               # bad data — retrying refetches it
-                    raise
-                except Exception as e:  # noqa: BLE001 - retry any GCS/dask read error
-                    if attempt == max_retries:
-                        raise RuntimeError(
-                            f"{year} fields [{start}:{stop}] failed after {max_retries} "
-                            f"attempts: {type(e).__name__}: {e}"
-                        ) from e
-                    wait = min(30, 3 * attempt)
-                    print(f"    [retry {attempt}/{max_retries}] {year} [{start}:{stop}] "
-                          f"{type(e).__name__}; reconnecting in {wait}s ...", flush=True)
-                    time.sleep(wait)
-                    da = _open_da(dcfg, lat_range, timeout, chunk_time)  # fresh session
-                    sub = _year_sub(da, year, stride)
+            # One channel at a time: the working set is a single variable's
+            # chunks, not all C at once (see _open_da).
+            for ci in range(C):
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        chunk = subs[ci].isel(time=slice(start, stop)).values.astype(np.float32)
+                        if not np.isfinite(chunk).all():
+                            raise BadFieldData(
+                                f"{year} channel {ci} fields [{start}:{stop}] "
+                                "contain NaN/Inf.")
+                        out[start:stop, ci] = chunk
+                        del chunk
+                        break
+                    except BadFieldData:           # bad data — retrying refetches it
+                        raise
+                    except Exception as e:  # noqa: BLE001 - retry any GCS/dask read error
+                        if attempt == max_retries:
+                            raise RuntimeError(
+                                f"{year} channel {ci} fields [{start}:{stop}] failed after "
+                                f"{max_retries} attempts: {type(e).__name__}: {e}"
+                            ) from e
+                        wait = min(30, 3 * attempt)
+                        print(f"    [retry {attempt}/{max_retries}] {year} ch{ci} "
+                              f"[{start}:{stop}] {type(e).__name__}; reconnecting in "
+                              f"{wait}s ...", flush=True)
+                        time.sleep(wait)
+                        das, _, _ = _open_da(dcfg, lat_range, timeout, chunk_time)
+                        subs = [_year_sub(d, year, stride) for d in das]
             start = stop
             print(f"    {year}: {stop}/{T}", flush=True)
         out.flush()
@@ -245,9 +256,8 @@ def main():
                 np.savez(coords_path, lat=lat, lon=lon, channels=np.array(labels))
 
     if not coords_path.exists():  # e.g. resumed run where every year was cached
-        da = _open_da(dcfg, lat_range, args.timeout, args.chunk_time)
-        np.savez(coords_path, lat=da["latitude"].values, lon=da["longitude"].values,
-                 channels=np.array(labels))
+        _, lat, lon = _open_da(dcfg, lat_range, args.timeout, args.chunk_time)
+        np.savez(coords_path, lat=lat, lon=lon, channels=np.array(labels))
 
     # ── Merge per-year caches into train.npy / test.npy ───────────────────
     merged = {}
