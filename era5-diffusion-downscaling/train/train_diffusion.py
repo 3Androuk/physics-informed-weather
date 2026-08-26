@@ -28,8 +28,9 @@ from models.unet import build_unet  # noqa: E402
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
-from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
-                   geo_suffix, init_wandb, load_config, run_name, set_seed)
+from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
+                   channel_labels, display_channel, ensure_dir, geo_suffix,
+                   init_wandb, load_config, run_name, set_seed)
 
 
 def main():
@@ -53,6 +54,7 @@ def main():
                     help="Force geo.level_gating: true — noise-dependent gating "
                          "of the embedding levels (fine levels fade out at high "
                          "noise); checkpoint gains a _gated suffix.")
+    add_perf_args(ap)
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -65,6 +67,7 @@ def main():
         cfg.setdefault("geo", {})["level_gating"] = True
     if args.seed is not None:
         cfg["seed"] = args.seed
+    apply_perf_overrides(cfg, args, "train")
     set_seed(cfg["seed"])
     dist = init_distributed()  # no-op unless launched under torchrun
     device = dist.device

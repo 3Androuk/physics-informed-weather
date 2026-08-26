@@ -25,6 +25,39 @@ def load_config(path: str | os.PathLike = "config/default.yaml") -> dict:
     return cfg
 
 
+def add_perf_args(ap):
+    """Register the hardware-dependent CLI knobs shared by every trainer.
+
+    The checked-in config values are tuned for one machine (a 24 GB card, 4
+    dataloader workers). On different hardware they are simply wrong — a 96 GB
+    GH200 wants a far larger batch, a 288-core node wants more workers.
+    Overriding from the CLI keeps one canonical config instead of a fork per
+    cluster. Pair with `apply_perf_overrides`.
+    """
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="Override the training batch size. PER PROCESS under "
+                         "torchrun, so the global batch is this x world size.")
+    ap.add_argument("--num-workers", type=int, default=None,
+                    help="Override train.num_workers (dataloader subprocesses per "
+                         "process). Too few starves the GPU, which is wasted spend "
+                         "on a node-hour-billed cluster.")
+    return ap
+
+
+def apply_perf_overrides(cfg: dict, args, batch_section: str = "train") -> dict:
+    """Apply --batch-size / --num-workers onto a loaded config, in place.
+
+    `batch_section` is the config section owning batch_size — "train" for the
+    generative trainers, "directmap" for the regression one. num_workers always
+    lives under train.
+    """
+    if getattr(args, "batch_size", None) is not None:
+        cfg[batch_section]["batch_size"] = args.batch_size
+    if getattr(args, "num_workers", None) is not None:
+        cfg["train"]["num_workers"] = args.num_workers
+    return cfg
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)

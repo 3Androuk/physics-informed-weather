@@ -309,6 +309,58 @@ rules). Only rank 0 validates, logs (stdout / TensorBoard / wandb), and writes
 checkpoints; the checkpoint format is unchanged, so runs move freely between
 single- and multi-GPU setups and `--resume` works across both.
 
+`--batch-size` and `--num-workers` override `train.batch_size` (or
+`directmap.batch_size`) and `train.num_workers` on any trainer, so one config
+serves machines with different GPU memory and core counts without being forked.
+
+### Running on BriCS Isambard-AI
+
+Isambard-AI nodes are **4× GH200** (96 GB HBM each, 288 Grace cores, aarch64)
+and the site **bills in node-hours, charging a partial-node job for the whole
+node**. Asking for 1 GPU therefore costs exactly what 4 cost. Two consequences
+shape everything below: always take the whole node, and never hold a node for
+work that does not use the GPUs.
+
+```bash
+# Whole node, all 4 GH200s, auto-chained across the 24h walltime limit
+sbatch scripts/isambard_train.sbatch train.train_flow_matching \
+    --config config/wb2_20var.yaml --geo
+```
+
+`scripts/isambard_train.sbatch` requests `--nodes=1 --gpus=4`, launches
+torchrun with 4 processes (one per GH200), always passes `--resume`, and — on
+Slurm's pre-walltime `USR1` — queues a continuation with
+`--dependency=afterany`, so a 200-epoch run spans as many 24h jobs as it needs
+from the per-epoch checkpoints. A run that *crashes* is deliberately not
+chained; replaying a crash just spends node-hours on it.
+
+Note `scripts/train_multinode.sh` defaults to **4 nodes × 1 GPU** — correct for
+a cluster with one GPU per node, but four times the cost here for the same four
+GPUs. Use the sbatch wrapper on Isambard-AI, or pass
+`NNODES=1 NPROC_PER_NODE=4`.
+
+Data download runs on a **login node**, not through Slurm:
+
+```bash
+tmux new -s dl
+scripts/download_login.sh config/wb2_20var.yaml
+```
+
+Login nodes are not a Slurm allocation, so this costs nothing; a Slurm download
+would hold four idle H100s for hours. They do cap a user at ~4 GiB RAM, which
+is why `data.download_era5` streams each batch straight into an on-disk memmap
+(~0.8 GiB peak at `--batch 16`) instead of buffering a year (~19 GiB at 20
+channels). The download is resumable per year — rerun it if the link drops.
+
+Storage: `$HOME` is only 100 GiB, too small for the 20-variable raw data
+(~208 GiB, and ~415 GiB at peak while the per-year caches are merged). Put
+`datasets/` on `$SCRATCHDIR` (5 TiB) or `$PROJECTDIR` (200 TiB) and point
+`paths.*` at it. Nothing on the system is backed up.
+
+PyTorch on aarch64: `pip install torch --index-url
+https://download.pytorch.org/whl/cu128` (needs torch ≥ 2.6); build the venv
+from a compute node.
+
 ### Experiment tracking (Weights & Biases)
 
 wandb is **opt-in** and independent of the always-on TensorBoard logs

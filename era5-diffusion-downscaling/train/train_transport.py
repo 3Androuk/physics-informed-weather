@@ -24,8 +24,9 @@ from models.transport import build_transport, build_transport_model  # noqa: E40
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
-from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
-                   init_wandb, load_config, run_name, set_seed)
+from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
+                   display_channel, ensure_dir, geo_suffix, init_wandb,
+                   load_config, run_name, set_seed)
 
 
 def _parser(method: str):
@@ -52,6 +53,7 @@ def _parser(method: str):
                          "ratio-randomized regression mean (meanmap*.pt from "
                          "train_directmap --random-ratio). Implies --residual; the "
                          "checkpoint stem gains an _lm suffix and remembers the mean.")
+    add_perf_args(ap)
     return ap
 
 
@@ -68,6 +70,7 @@ def run(method: str):
         cfg.setdefault("geo", {})["level_gating"] = True
     if args.seed is not None:
         cfg["seed"] = args.seed
+    apply_perf_overrides(cfg, args, "train")
     set_seed(cfg["seed"])
 
     dist = init_distributed()  # no-op unless launched under torchrun

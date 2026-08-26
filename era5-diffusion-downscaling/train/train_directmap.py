@@ -27,8 +27,9 @@ from data.degrade import degrade  # noqa: E402
 from models.unet import build_unet  # noqa: E402
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
-from utils import (display_channel, ensure_dir, geo_suffix,  # noqa: E402
-                   init_wandb, load_config, run_name, set_seed)
+from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
+                   display_channel, ensure_dir, geo_suffix, init_wandb,
+                   load_config, run_name, set_seed)
 
 
 def main():
@@ -51,6 +52,7 @@ def main():
                          "becomes meanmap*.pt). The plain direct map stays "
                          "fixed-ratio by design — this mode is a different role, "
                          "not a replacement.")
+    add_perf_args(ap)
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -59,6 +61,7 @@ def main():
         cfg.setdefault("geo", {})["enabled"] = True
     if args.encoder is not None:
         cfg.setdefault("geo", {})["encoder"] = args.encoder
+    apply_perf_overrides(cfg, args, "directmap")
     set_seed(cfg["seed"])
     dist = init_distributed()  # no-op unless launched under torchrun
     device = dist.device
