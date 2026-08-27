@@ -193,6 +193,34 @@ def test_residual_scale_roundtrip_and_projection():
     assert torch.allclose(out2 - mean, 2 * (out1 - mean), atol=1e-5)
 
 
+def test_multichannel_residual_model():
+    """20-variable shape: the mean contributes one channel per field channel."""
+    cfg = {**CFG, "model": {**CFG["model"], "in_channels": 20, "out_channels": 20}}
+    model = build_residual_model(cfg)
+    d = HPXGaussianDiffusion(**CFG["diffusion"])
+    g = torch.Generator().manual_seed(21)
+    x0 = torch.randn(1, 12, 20, NSIDE, NSIDE, generator=g)
+    mean = torch.randn(1, 12, 20, NSIDE, NSIDE, generator=g)
+    loss = d.training_loss(model, x0, cond=(mean,))
+    assert loss.ndim == 0 and torch.isfinite(loss)
+    out = model(x0, torch.tensor([5.0]), (mean,))
+    assert out.shape == x0.shape
+
+
+def test_padding_survives_autocast_dtypes():
+    """Regression: autocast runs .sum() in fp32, which broke index_copy in the
+    cross-face corner fill under bf16/fp16 autocast."""
+    from hpx.padding import HEALPixPadding
+    pad = HEALPixPadding(NSIDE, 1)
+    x32 = torch.randn(12, 3, NSIDE, NSIDE)
+    ref = pad(x32)
+    for dtype in (torch.bfloat16, torch.float16):
+        out = pad(x32.to(dtype))
+        assert out.dtype == dtype, (dtype, out.dtype)
+        assert torch.isfinite(out).all()
+        assert torch.allclose(out.float(), ref, atol=5e-2), dtype
+
+
 def test_bilinear_mean_field():
     """The Phase-A mean is a real seam-aware upsample of the coarse field."""
     mf = MeanField("bilinear", RATIO, nside=NSIDE)

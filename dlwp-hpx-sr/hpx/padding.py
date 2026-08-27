@@ -195,6 +195,9 @@ class HEALPixPadding(nn.Module):
             dst = getattr(self, f"fill_dst_{g}")
             src = getattr(self, f"fill_src_{g}")
             w = getattr(self, f"fill_w_{g}").to(out.dtype)
-            out = out.index_copy(2, dst, (out[:, :, src] * w).sum(-1))
+            # .sum() is on autocast's fp32 list, so under bf16/fp16 autocast the
+            # reduction comes back wider than `out`; index_copy needs a match.
+            fill = (out[:, :, src] * w).sum(-1).to(out.dtype)
+            out = out.index_copy(2, dst, fill)
         return (out.reshape(b, c, 12, S * S).transpose(1, 2)
                 .reshape(b * 12, c, S, S))

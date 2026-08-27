@@ -49,8 +49,14 @@ class HPXResidualUNet(nn.Module):
 
 
 def build_residual_model(cfg: dict) -> HPXResidualUNet:
-    # +1 input channel for the mean field; a noise predictor has no global residual
-    base = build_model(cfg, use_time=True, extra_in_channels=1)
+    """Noise predictor conditioned on the mean field.
+
+    The mean field carries one channel per field channel, so a 20-variable run
+    feeds 20 noisy-residual + 20 mean = 40 input channels. A noise predictor
+    has no global residual.
+    """
+    extra = int(cfg["model"]["in_channels"])
+    base = build_model(cfg, use_time=True, extra_in_channels=extra)
     base.global_residual = False
     return HPXResidualUNet(base)
 
