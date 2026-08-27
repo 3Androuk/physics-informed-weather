@@ -94,8 +94,22 @@ geo:
     - geopotential_at_surface
     - land_sea_mask
     - slope_of_sub_gridscale_orography
+  # Ladder-MATCHED HEALPix: Nside 8,11,14,20,26,35,48,64 -> 7.33 deg (815 km)
+  # down to 0.92 deg (102 km), the same scale band and growth factor (b~1.35)
+  # as the hash grid's 16..128, at 218k dense params against the hash's 3.3M.
+  # nside_min is what makes it matched — WITHOUT it the default of 1 gives the
+  # power-of-two ladder 1,2,...,128, whose three coarsest levels (6520/3260/
+  # 1630 km) are at or above the 32 deg patch span and so are near-constant per
+  # patch, and whose finest (51 km, <2 ERA5 px) violates this file's own ~150 km
+  # cap. That misallocation is the diagnosed cause of the original HEALPix
+  # deficit, so leaving nside_min unset reproduces the known-bad result.
   healpix_n_levels: 8
-  healpix_nside_max: 128
+  healpix_nside_min: 8
+  healpix_nside_max: 64
+  # Index file must be regenerated whenever the ladder changes, or the
+  # precomputed neighbours/weights and the tables disagree about resolutions:
+  #   python -m data.make_healpix_index --config config/wb2_20var.yaml
+  healpix_index: healpix_index_matched.npz
   input_dim: 3
   n_levels: 8
   n_features_per_level: 2
