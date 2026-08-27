@@ -34,6 +34,7 @@ from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
 from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
+                   resolve_amp,
                    display_channel, ensure_dir, geo_suffix, init_wandb,
                    load_config, run_name, set_seed)
 
@@ -179,8 +180,10 @@ def main():
     print(f"UNet params: {n_params:,}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
-    use_amp = tc["amp"] and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_amp, amp_dtype = resolve_amp(tc, device.type)
+    # A GradScaler exists for fp16's narrow exponent range; bf16 needs none.
+    scaler = torch.amp.GradScaler(
+        "cuda", enabled=use_amp and amp_dtype is torch.float16)
 
     start_epoch, step = 1, 0
     ckpt_path = ckpt_dir / ckpt_name
@@ -240,7 +243,7 @@ def main():
             mean_f = mean_fn(y, ratio, coords)
             x0 = (y - mean_f) / res_std
             opt.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 loss = diffusion.training_loss(model, x0, cond=(mean_f, coords))
             scaler.scale(loss).backward()
             scaler.unscale_(opt)

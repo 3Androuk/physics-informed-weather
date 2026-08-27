@@ -129,6 +129,10 @@ train:
   weight_decay: 0.0
   grad_clip: 1.0
   amp: false
+  # off | fp16 | bf16 (CLI: --amp-dtype). bf16 is the one to use on GH200/H100:
+  # fp32's exponent range so no loss scaling, ~2x throughput and ~half the
+  # activation memory. Legacy `amp: true` above still means fp16.
+  amp_dtype: off
   ema_decay: 0.999
   num_workers: 4
   log_every: 50

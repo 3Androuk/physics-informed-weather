@@ -28,6 +28,7 @@ from models.unet import build_unet  # noqa: E402
 from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
+                   resolve_amp,
                    display_channel, ensure_dir, geo_suffix, init_wandb,
                    load_config, run_name, set_seed)
 
@@ -123,8 +124,10 @@ def main():
         model = build_unet(cfg, use_time=False).to(device)
     print(f"UNet params: {sum(p.numel() for p in model.parameters()):,}")
     opt = torch.optim.AdamW(model.parameters(), lr=dc["lr"])
-    use_amp = dc["amp"] and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_amp, amp_dtype = resolve_amp(dc, device.type)
+    # A GradScaler exists for fp16's narrow exponent range; bf16 needs none.
+    scaler = torch.amp.GradScaler(
+        "cuda", enabled=use_amp and amp_dtype is torch.float16)
     loss_fn = torch.nn.MSELoss()
 
     def fwd(x, c):
@@ -192,7 +195,7 @@ def main():
             # batch in --random-ratio (mean) mode.
             x = degrade(y, random.choice(train_ratios) if train_ratios else ratio)
             opt.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 loss = loss_fn(fwd(x, coords), y)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)

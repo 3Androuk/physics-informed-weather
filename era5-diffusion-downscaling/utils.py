@@ -45,7 +45,43 @@ def add_perf_args(ap):
                     help="Override train.num_workers (dataloader subprocesses per "
                          "process). Too few starves the GPU, which is wasted spend "
                          "on a node-hour-billed cluster.")
+    ap.add_argument("--amp-dtype", choices=["off", "fp16", "bf16"], default=None,
+                    help="Mixed-precision mode. bf16 is the one to want on "
+                         "GH200/H100: same exponent range as fp32, so no loss "
+                         "scaling and none of fp16's overflow risk on "
+                         "noise-prediction targets, at ~2x throughput and ~half "
+                         "the activation memory. fp16 is the legacy behaviour of "
+                         "`amp: true`. Default off — precision is not changed "
+                         "silently.")
     return ap
+
+
+def resolve_amp(section: dict, device_type: str):
+    """(enabled, dtype) for torch.amp, from a config section's `amp_dtype`.
+
+    `section` is the block that owns the setting — train for the generative
+    trainers, directmap for the regression one — matching where each trainer
+    already reads `amp`.
+
+    Back-compat: a legacy `amp: true` with no `amp_dtype` means fp16, because
+    that is what `autocast("cuda")` defaulted to before this existed. Reading
+    it as bf16 would silently change the numerics of existing configs.
+    """
+    import torch  # noqa: PLC0415 - see the module-scope note
+
+    mode = section.get("amp_dtype")
+    if mode is None:
+        mode = "fp16" if section.get("amp", False) else "off"
+    if mode == "off" or device_type != "cuda":
+        return False, None
+    if mode == "fp16":
+        return True, torch.float16
+    if mode == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError(
+                "amp_dtype: bf16 requested but this GPU reports no bf16 support")
+        return True, torch.bfloat16
+    raise ValueError(f"unknown amp_dtype {mode!r} (expected off, fp16 or bf16)")
 
 
 def apply_perf_overrides(cfg: dict, args, batch_section: str = "train") -> dict:
@@ -59,6 +95,10 @@ def apply_perf_overrides(cfg: dict, args, batch_section: str = "train") -> dict:
         cfg[batch_section]["batch_size"] = args.batch_size
     if getattr(args, "num_workers", None) is not None:
         cfg["train"]["num_workers"] = args.num_workers
+    if getattr(args, "amp_dtype", None) is not None:
+        # Same section that owns batch_size, which is also where each trainer
+        # already reads `amp`.
+        cfg[batch_section]["amp_dtype"] = args.amp_dtype
     return cfg
 
 

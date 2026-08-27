@@ -25,6 +25,7 @@ from train.distributed import (cleanup, init_distributed,  # noqa: E402
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
 from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
+                   resolve_amp,
                    display_channel, ensure_dir, geo_suffix, init_wandb,
                    load_config, run_name, set_seed)
 
@@ -152,8 +153,10 @@ def run(method: str):
         model.parameters(), lr=train_cfg["lr"],
         weight_decay=train_cfg.get("weight_decay", 0.0),
     )
-    use_amp = train_cfg.get("amp", False) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_amp, amp_dtype = resolve_amp(train_cfg, device.type)
+    # A GradScaler exists for fp16's narrow exponent range; bf16 needs none.
+    scaler = torch.amp.GradScaler(
+        "cuda", enabled=use_amp and amp_dtype is torch.float16)
 
     stem = _checkpoint_stem(method, cfg, args.seed is not None,
                             residual_mode, args.mean_ckpt is not None)
@@ -230,7 +233,7 @@ def run(method: str):
             else:
                 cond_field, train_target = degrade(target, ratio), target
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 result = process.training_loss(
                     model, train_target, cond_field, coords, return_details=True)
                 loss, _, _, *extra = result
