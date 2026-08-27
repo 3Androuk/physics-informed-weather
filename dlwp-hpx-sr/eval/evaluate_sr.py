@@ -110,7 +110,9 @@ def main():
                   normalizer.mean + 5 * normalizer.std)
     n_px = 0
 
-    batch = 8
+    # Forward-only still peaks ~2.5 GiB/sample at nside 256 (the expansion
+    # MLPs; grad_checkpoint does not apply in eval), so batch 4 for 24 GB.
+    batch = int(ec.get("batch_size", 4))
     with torch.no_grad():
         for start in range(0, n, batch):
             y = torch.stack([ds[i] for i in range(start, min(start + batch, n))])
