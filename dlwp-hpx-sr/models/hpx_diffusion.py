@@ -170,6 +170,75 @@ class HPXGaussianDiffusion(nn.Module):
         return project_faces(out, lf, ratio) if project else out
 
 
+    # ── guided reconstruction from an UNCONDITIONAL prior ────────────────
+    @torch.no_grad()
+    def guided_reconstruct(self, model: nn.Module, x_guidance: torch.Tensor,
+                           t_steps, K: int = 1, eta: float = 0.0, stride: int = 1,
+                           project: bool = True, lf: torch.Tensor = None,
+                           ratio: int = None, generator=None,
+                           progress: bool = False) -> torch.Tensor:
+        """Shu et al. (2023) Algorithm 2 on the mesh, physics term dropped.
+
+        `model` is an UNCONDITIONAL prior: it was trained on high-resolution
+        fields alone and has never seen a degradation ratio. The ratio enters
+        only here — through the guidance field, the start levels `t_steps`, and
+        the projection — so the SAME checkpoint serves every ratio, including
+        ratios never trained on. That is the property the conditional and
+        residual formulations lack, and why they collapse out of distribution.
+
+        Each outer loop mixes noise into the current guidance at level t0,
+        x_t0 = sqrt(abar_t0) x_g + sqrt(1 - abar_t0) eps, then runs DDIM down to
+        0 with the exact mesh projection applied to every x0 estimate. The
+        reconstruction becomes the next loop's guidance (recursive refinement).
+
+        Args:
+            x_guidance: (B,12,C,F,F) coarse field upsampled onto the target mesh.
+            t_steps: one start timestep per outer loop; len(t_steps) == K.
+            lf, ratio: the coarse observation and its ratio, for the projection.
+        """
+        if len(t_steps) != K:
+            raise ValueError(f"t_steps must have K={K} entries, got {len(t_steps)}")
+        if project and (lf is None or ratio is None):
+            raise ValueError("project=True needs lf and ratio")
+        device = x_guidance.device
+        x_g = x_guidance
+        loops = range(K)
+        if progress:
+            from tqdm import tqdm
+            loops = tqdm(list(loops), desc="outer K")
+
+        for k in loops:
+            t0 = int(t_steps[k])
+            seq = list(range(0, t0 + 1, stride))
+            if seq[-1] != t0:
+                seq.append(t0)
+            eps = torch.randn(x_g.shape, device=device, generator=generator,
+                              dtype=x_g.dtype)
+            x = self.sqrt_abar[t0] * x_g + self.sqrt_one_minus_abar[t0] * eps
+
+            for i in reversed(range(1, len(seq))):
+                ti, tprev = seq[i], seq[i - 1]
+                a_i = self.alphas_cumprod[ti]
+                a_prev = self.alphas_cumprod[tprev]
+                t_batch = torch.full((x.shape[0],), ti, device=device,
+                                     dtype=torch.float32)
+                eps_theta = model(x, t_batch)
+                x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
+                if project:
+                    x0_pred = project_faces(x0_pred, lf, ratio)
+                sigma = eta * (
+                    ((1 - a_prev) / (1 - a_i)).clamp(min=0).sqrt()
+                    * (1 - a_i / a_prev).clamp(min=0).sqrt())
+                dir_xt = (1 - a_prev - sigma ** 2).clamp(min=0).sqrt() * eps_theta
+                x = a_prev.sqrt() * x0_pred + dir_xt
+                if eta > 0:
+                    x = x + sigma * torch.randn(x.shape, device=device,
+                                                generator=generator, dtype=x.dtype)
+            x_g = x  # recursive refinement
+
+        return project_faces(x_g, lf, ratio) if project else x_g
+
+
 def build_diffusion(cfg: dict) -> HPXGaussianDiffusion:
     d = cfg["diffusion"]
     return HPXGaussianDiffusion(

@@ -193,6 +193,70 @@ def test_residual_scale_roundtrip_and_projection():
     assert torch.allclose(out2 - mean, 2 * (out1 - mean), atol=1e-5)
 
 
+def test_guided_reconstruct_is_ratio_agnostic():
+    """One unconditional prior serves every ratio, with exact consistency.
+
+    The prior takes no conditioning at all, so the projection is the ONLY link
+    between output and observation — which is why guided reconstruction can be
+    asked for a ratio the model never saw.
+    """
+    torch.manual_seed(0)
+    from train.train_prior import build_prior_model
+    model = build_prior_model(CFG)
+    d = HPXGaussianDiffusion(**CFG["diffusion"])
+    y = _field(seed=30)
+    for ratio in (2, 4):                       # same checkpoint, different ratios
+        lf = coarsen_faces(y, ratio)
+        x_g = degrade_faces(y, ratio)
+        out = d.guided_reconstruct(model, x_g, t_steps=[8, 5], K=2, stride=2,
+                                   project=True, lf=lf, ratio=ratio,
+                                   generator=torch.Generator().manual_seed(1))
+        assert out.shape == y.shape and torch.isfinite(out).all()
+        back = coarsen_faces(out, ratio)
+        assert torch.allclose(back, lf, atol=1e-4), (ratio, (back - lf).abs().max())
+
+
+def test_guided_without_projection_ignores_the_observation():
+    """Ablation guard: with no projection the prior is unconstrained.
+
+    Two different observations must still produce the same field when the
+    projection is off and the noise seed is shared, because nothing else
+    carries the observation into the chain (the guidance only sets the start).
+    """
+    torch.manual_seed(0)
+    from train.train_prior import build_prior_model
+    model = build_prior_model(CFG)
+    d = HPXGaussianDiffusion(**CFG["diffusion"])
+    y = _field(seed=31)
+    lf = coarsen_faces(y, 4)
+    x_g = degrade_faces(y, 4)
+    kw = dict(t_steps=[6], K=1, stride=2, lf=lf, ratio=4)
+    on = d.guided_reconstruct(model, x_g, project=True,
+                              generator=torch.Generator().manual_seed(2), **kw)
+    off = d.guided_reconstruct(model, x_g, project=False,
+                               generator=torch.Generator().manual_seed(2), **kw)
+    assert not torch.allclose(on, off, atol=1e-5)
+    # only the projected one satisfies the constraint
+    assert torch.allclose(coarsen_faces(on, 4), lf, atol=1e-4)
+    assert not torch.allclose(coarsen_faces(off, 4), lf, atol=1e-4)
+
+
+def test_guided_reconstruct_rejects_bad_arguments():
+    from train.train_prior import build_prior_model
+    model = build_prior_model(CFG)
+    d = HPXGaussianDiffusion(**CFG["diffusion"])
+    x_g = _field(seed=32)
+    for kwargs, exc in (
+        (dict(t_steps=[5, 5], K=1), ValueError),          # len(t_steps) != K
+        (dict(t_steps=[5], K=1, project=True), ValueError),  # project without lf
+    ):
+        try:
+            d.guided_reconstruct(model, x_g, **kwargs)
+        except exc:
+            continue
+        raise AssertionError(f"expected {exc.__name__} for {kwargs}")
+
+
 def test_multichannel_residual_model():
     """20-variable shape: the mean contributes one channel per field channel."""
     cfg = {**CFG, "model": {**CFG["model"], "in_channels": 20, "out_channels": 20}}
