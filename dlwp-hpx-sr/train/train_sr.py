@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import HPXDataset, load_norm_stats  # noqa: E402
 from data.degrade import degrade_faces  # noqa: E402
 from models.hpx_unet import build_model, count_params  # noqa: E402
-from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   resolve_amp, set_seed)
 
 
 def _atomic_save(obj, path: Path):
@@ -105,8 +106,10 @@ def main():
                             weight_decay=tc["weight_decay"])
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"])
              if tc.get("cosine_lr") else None)
-    use_amp = tc["amp"] and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_amp, amp_dtype = resolve_amp(tc, device)
+    # GradScaler exists for fp16's narrow exponent range; bf16 keeps fp32's
+    # range and needs none (a disabled scaler is a pass-through).
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype is torch.float16)
     loss_fn = torch.nn.MSELoss()
 
     best_val = float("inf")
@@ -147,7 +150,7 @@ def main():
         for y in loader:  # y: normalized HR faces (B, 12, 1, F, F)
             y = y.to(device, non_blocking=True)
             x = degrade_faces(y, ratio)  # LR input on the HR grid
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 loss = loss_fn(model(x), y)
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at step {step}; aborting "

@@ -73,7 +73,11 @@ train:
   weight_decay: 1.0e-5
   cosine_lr: true
   grad_clip: 1.0
-  amp: false                         # fp32 (fp16 NaN'ed in the sibling project)
+  amp: false                         # true + bfloat16 is safe on Ampere/Hopper
+  amp_dtype: bfloat16                # never float16 (torch's autocast default):
+                                     # its narrow exponent range NaN'ed the sibling.
+                                     # Sampling/eval stay fp32 regardless, so the
+                                     # exact mesh projection keeps full precision.
   ema_decay: 0.999                   # samples are drawn from the EMA weights
   val_fraction: 0.1
   num_workers: 4

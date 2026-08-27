@@ -35,6 +35,37 @@ def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def resolve_amp(train_cfg: dict, device) -> tuple[bool, "torch.dtype"]:
+    """(enabled, dtype) for mixed-precision training.
+
+    `train.amp_dtype` defaults to **bfloat16**, not fp16: torch's autocast
+    default on CUDA is float16, whose 5-bit exponent overflows easily and needs
+    loss scaling to survive — that is what NaN'ed in the sibling project.
+    bfloat16 keeps fp32's 8-bit exponent (trading mantissa bits instead), so the
+    failure mode is precision, not blow-up, and no GradScaler is needed. Both
+    the RTX 3090 Ti and the H100 have native bf16 tensor cores.
+
+    Sampling and evaluation deliberately stay in fp32: inference is cheap, and
+    the exact mesh projection (coarsen(pred) == lf) depends on the pooling
+    arithmetic.
+    """
+    enabled = bool(train_cfg.get("amp", False)) and device.type == "cuda"
+    name = str(train_cfg.get("amp_dtype", "bfloat16")).lower()
+    dtypes = {"bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+              "float16": torch.float16, "fp16": torch.float16, "half": torch.float16}
+    if name not in dtypes:
+        raise ValueError(f"train.amp_dtype must be one of {sorted(set(dtypes))}, "
+                         f"got {name!r}")
+    dtype = dtypes[name]
+    if enabled and dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("train.amp_dtype is bfloat16 but this GPU lacks bf16 "
+                           "support; set amp: false or amp_dtype: float16")
+    if enabled:
+        print(f"mixed precision: {name} "
+              f"({'GradScaler on' if dtype is torch.float16 else 'no GradScaler needed'})")
+    return enabled, dtype
+
+
 def ensure_dir(path: str | os.PathLike) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)

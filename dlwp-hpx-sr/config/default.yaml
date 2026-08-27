@@ -59,7 +59,10 @@ train:
   weight_decay: 1.0e-5
   cosine_lr: true
   grad_clip: 1.0
-  amp: false                     # fp32 by default (fp16 NaN'ed in the sibling project)
+  amp: false                     # true + amp_dtype bfloat16 is safe on Ampere/Hopper
+  amp_dtype: bfloat16            # NEVER float16 here: torch's autocast default is
+                                 # fp16, whose narrow exponent range is what NaN'ed
+                                 # in the sibling project. bf16 keeps fp32's range.
   val_fraction: 0.1              # time-ordered tail of the train years
   num_workers: 4
   log_every: 50

@@ -33,7 +33,8 @@ from models.hpx_diffusion import build_diffusion  # noqa: E402
 from models.hpx_residual import build_residual_model, load_mean_field  # noqa: E402
 from models.hpx_unet import count_params  # noqa: E402
 from train.ema import EMA  # noqa: E402
-from utils import ensure_dir, get_device, init_wandb, load_config, set_seed  # noqa: E402
+from utils import (ensure_dir, get_device, init_wandb, load_config,  # noqa: E402
+                   resolve_amp, set_seed)
 
 
 def _atomic_save(obj, path: Path):
@@ -172,8 +173,9 @@ def main():
                             weight_decay=tc["weight_decay"])
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"])
              if tc.get("cosine_lr") else None)
-    use_amp = tc["amp"] and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_amp, amp_dtype = resolve_amp(tc, device)
+    # bf16 keeps fp32's exponent range, so no loss scaling is required
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype is torch.float16)
 
     best_val = float("inf")
     step = 0
@@ -211,7 +213,7 @@ def main():
             lf_up = degrade_faces(y, ratio)
             mean = mean_field(lf_up)
             x0 = (y - mean) / res_scale        # ~unit-variance residual target
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 loss = diffusion.training_loss(model, x0, cond=(mean,))
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at step {step}; aborting "

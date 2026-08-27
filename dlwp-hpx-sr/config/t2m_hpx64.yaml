@@ -44,7 +44,8 @@ train:
   weight_decay: 1.0e-5
   cosine_lr: true
   grad_clip: 1.0
-  amp: false
+  amp: false                     # true + amp_dtype bfloat16 is safe on Ampere/Hopper
+  amp_dtype: bfloat16            # never float16 (torch's autocast default)
   val_fraction: 0.1
   num_workers: 4
   log_every: 50
