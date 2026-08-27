@@ -69,6 +69,81 @@ class LatLonToHPX:
         return nest_to_faces(vals, self.nside)
 
 
+class LatLonToHPXSHT:
+    """Spherical-harmonic lat-lon -> HEALPix resampling (drop-in for LatLonToHPX).
+
+    Exact harmonic analysis on the source grid followed by synthesis on the
+    mesh. The WB2 0.25 deg grid (721 rings, poles included, equidistant in
+    longitude from 0) is a Clenshaw-Curtis geometry, for which ducc0's
+    `analysis_2d` is exact up to the grid's own band limit.
+
+    Band-limited to lmax = 2*nside, which is the MESH's limit, not the grid's:
+    a HEALPix map at nside cannot represent harmonics above ~2*nside. Content
+    above that is therefore truncated cleanly instead of being aliased and
+    smoothed, which is what point-sampled bilinear does at critical sampling.
+    At HPX256 that discards l in (512, 720]; HPX512 (lmax 1024 > 720) would
+    keep the whole 0.25 deg content and make the forward step lossless.
+
+    Values are point samples at pixel centers (no pixel-window deconvolution),
+    matching the convention of LatLonToHPX and hpx_to_latlon.
+    """
+
+    def __init__(self, lat: np.ndarray, lon: np.ndarray, nside: int,
+                 lmax: int | None = None, nthreads: int = 8):
+        self.nside = check_nside(nside)
+        lat = np.asarray(lat, dtype=np.float64)
+        lon = np.asarray(lon, dtype=np.float64)
+        self.nlat, self.nlon = len(lat), len(lon)
+        self.nthreads = int(nthreads)
+        self.lmax = int(lmax if lmax is not None else 2 * self.nside)
+
+        ascending = lat[0] < lat[-1]
+        poles = abs(abs(lat[0]) - 90.0) < 1e-6 and abs(abs(lat[-1]) - 90.0) < 1e-6
+        if not poles:
+            raise ValueError(
+                "SHT remap needs a global grid whose first and last rows are "
+                f"the poles (Clenshaw-Curtis); got lat[0]={lat[0]}, "
+                f"lat[-1]={lat[-1]}. Use LatLonToHPX for a latitude band.")
+        dlon = np.diff(lon)
+        if not np.allclose(dlon, dlon[0], atol=1e-6) or abs(lon[0]) > 1e-6:
+            raise ValueError("SHT remap needs longitudes equidistant from 0")
+        if self.lmax > self.nlat - 1:
+            raise ValueError(f"lmax {self.lmax} exceeds the grid's band limit "
+                             f"{self.nlat - 1}")
+        # ducc0 CC geometry orders rings by colatitude: north pole first
+        self.flip = bool(ascending)
+
+    def __call__(self, fields: np.ndarray) -> np.ndarray:
+        """(..., nlat, nlon) -> (..., 12, nside, nside) float32 faces."""
+        import healpy as hp
+        from ducc0.sht.experimental import analysis_2d
+
+        f = np.asarray(fields, dtype=np.float64)
+        if f.shape[-2:] != (self.nlat, self.nlon):
+            raise ValueError(f"expected trailing dims ({self.nlat}, {self.nlon}), "
+                             f"got {f.shape[-2:]}")
+        lead = f.shape[:-2]
+        flat = f.reshape(-1, self.nlat, self.nlon)
+        out = np.empty((len(flat), 12 * self.nside * self.nside), dtype=np.float32)
+        for i, m in enumerate(flat):
+            grid = m[::-1] if self.flip else m          # north pole first
+            alm = analysis_2d(map=np.ascontiguousarray(grid)[None], lmax=self.lmax,
+                              spin=0, geometry="CC", nthreads=self.nthreads)
+            ring = hp.alm2map(np.ascontiguousarray(alm[0]), nside=self.nside,
+                              lmax=self.lmax)
+            out[i] = hp.reorder(ring, r2n=True).astype(np.float32)
+        return nest_to_faces(out.reshape(*lead, -1), self.nside)
+
+
+def build_latlon_to_hpx(lat, lon, nside, method: str = "bilinear"):
+    """Factory: 'bilinear' (LatLonToHPX) or 'sht' (LatLonToHPXSHT)."""
+    if method == "bilinear":
+        return LatLonToHPX(lat, lon, nside)
+    if method == "sht":
+        return LatLonToHPXSHT(lat, lon, nside)
+    raise ValueError(f"unknown forward remap method: {method}")
+
+
 def hpx_to_latlon(faces: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     """(..., 12, F, F) faces -> (..., nlat, nlon) via spherical bilinear interp."""
     import astropy.units as u
