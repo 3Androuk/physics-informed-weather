@@ -56,8 +56,12 @@ model:
 train:
   batch_size: 2                      # as in default.yaml; the frozen mean adds
   accum_steps: 4                     # ~1GB, so keep micro-batch 2 + accumulation
-  epochs: 200                        # diffusion needs far more epochs than the
-                                     # regressor — start smaller to sanity-check
+  epochs: 100                        # ~35 min/epoch on a 3090-class card at
+                                     # micro-batch 2 (measured) => ~2.5 days.
+                                     # Checkpoints are per-epoch and --resume
+                                     # works, so stopping early is cheap: eval
+                                     # an intermediate best.pt before committing
+                                     # to the full run.
   lr: 2.0e-4
   weight_decay: 1.0e-5
   cosine_lr: true

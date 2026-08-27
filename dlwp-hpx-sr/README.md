@@ -10,7 +10,13 @@ runs a lighter/coarser t2m study at HPX64. The variable is configurable
 (e.g. `geopotential` + `level: 500` for Z500).
 
 The original DLWP-HPX is a forecasting model; here its *spatial* backbone is
-used as a direct mapping `f: degraded field -> high-res field` on the sphere.
+used two ways on the sphere:
+
+1. **Deterministic** — a direct mapping `f: degraded field -> high-res field`
+   (`train/train_sr.py`), trained with pixel MSE.
+2. **Sphere-native diffusion** — the same backbone as the noise predictor of a
+   DDPM over the *residual* against a frozen deterministic mean
+   (`train/train_diffusion.py`), see [Diffusion on the sphere](#diffusion-on-the-sphere).
 
 ## What is taken from the paper
 
@@ -115,6 +121,47 @@ Weights & Biases is opt-in, as in the sibling projects: `wandb login` once,
 then set `wandb.enabled: true` in the config or pass `--wandb`. Training logs
 loss/validation curves; evaluation logs the metrics and figures.
 
+## Diffusion on the sphere
+
+`train/train_diffusion.py` + `models/hpx_diffusion.py` turn the same backbone
+into a DDPM noise predictor (timestep embedding projected into every ConvNeXt
+block). The DDPM/DDIM math is carried over unchanged from the sibling
+`era5-diffusion-downscaling` project so the two studies stay numerically
+comparable; what changes is the geometry, and the geometry buys two things the
+patch pipeline could not have:
+
+- **No tiles, anywhere.** One sample is the whole globe, so there is no tiled
+  or fused reconstruction, no overlap blending, no shared-noise bookkeeping and
+  no seams to suppress. Sampling is `n_steps` global forward passes.
+- **The data-consistency projection is exact and global.** In nested ordering
+  coarsening a face is *exactly* average-pooling it, so
+  `x0 += upsample_nearest(lf - coarsen(x0, ratio), ratio)` makes
+  `coarsen(x0) == lf` identically over the whole sphere in one operation —
+  no per-tile projection to reconcile at boundaries. `tests/test_diffusion.py`
+  checks this to floating-point tolerance, and the evaluation reports the
+  residual `max |coarsen(pred) - lf|` as a running guarantee.
+
+The chain models the **residual** against a frozen deterministic mean, so the
+diffusion capacity goes entirely on the small-scale structure the regressor
+smooths away. Two means, mirroring the sibling's two phases:
+
+| `residual.mean` | mean field | needs |
+|---|---|---|
+| `learned` | a trained `train_sr.py` checkpoint (Phase B) | `--mean-ckpt` |
+| `bilinear` | seam-aware bilinear upsampling (Phase A) | nothing |
+
+```bash
+python -m train.train_diffusion --config config/diffusion.yaml \
+    --mean learned --mean-ckpt checkpoints/t2m_hpx256/best.pt   # --resume to continue
+python -m eval.evaluate_diffusion --config config/diffusion.yaml
+```
+
+Samples are drawn from EMA weights. `eval/evaluate_diffusion.py` scores
+diffusion / mean / bilinear / nearest on RMSE, MAE, bias, per-band RMSE and the
+per-face radial power spectrum — the metric the deterministic model loses on,
+and the reason this model exists. `--ensemble N` draws N seeded members per
+field (ensemble mean + spread); `--no-project` ablates the projection.
+
 ## Evaluation
 
 `eval/evaluate_sr.py` compares model / bilinear / nearest in physical units
@@ -135,10 +182,22 @@ dlwp-hpx-sr/
 │   ├── download_era5.py    # WB2 GCS -> HEALPix faces (resumable, per-year)
 │   ├── dataset.py          # normalized face dataset
 │   └── degrade.py          # exact HEALPix coarsen / upsample operators
-├── models/hpx_unet.py      # CappedGELU, HPX conv, ConvNeXt block, U-Net
-├── train/train_sr.py
-├── eval/evaluate_sr.py
-└── tests/test_hpx.py       # topology-validated padding + pipeline tests
+├── models/
+│   ├── hpx_unet.py         # CappedGELU, HPX conv, ConvNeXt block, U-Net
+│   ├── hpx_diffusion.py    # DDPM loss + DDIM sampler, exact mesh projection
+│   └── hpx_residual.py     # residual conditioning + frozen mean fields
+├── train/
+│   ├── train_sr.py         # deterministic
+│   ├── train_diffusion.py  # sphere-native residual diffusion
+│   └── ema.py
+├── eval/
+│   ├── evaluate_sr.py
+│   ├── evaluate_diffusion.py
+│   ├── compare_full_field.py  # head-to-head vs the sibling tiled/fused runs
+│   └── metrics.py          # verbatim sibling metrics (comparability)
+└── tests/
+    ├── test_hpx.py         # topology-validated padding + pipeline tests
+    └── test_diffusion.py   # schedule, projection exactness, sampling
 ```
 
 ## Extensions
