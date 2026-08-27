@@ -26,8 +26,28 @@ used two ways on the sphere:
 | Cross-face halo padding before every conv | yes — derived from mesh topology, see below |
 | Capped GELU activation (cap 10) | yes |
 | ConvNeXt-style residual blocks | yes — 3×3 dilated HPX conv + pointwise expansion MLP + 1×1 skip |
+| Residual prediction *within* each ConvNeXt block (§3.2.1) | yes — every block returns `skip(x) + f(x)` |
+| Residual prediction for the *full predictive step* (§3.2.1) | yes — `model.global_residual`: the net outputs a correction added to the input, the SR analogue of the paper's time increment |
 | U-Net over mesh resolutions, dilation growing with depth | yes — avg-pool down (= exact HEALPix coarsening), transposed-conv up, dilations `[1, 2, 4]` |
 | Temporal recurrence (GRU), multi-step forecasting | **no** — the SR task is single-time-step, so the recurrent parts are dropped |
+
+### Three senses of "residual" in this project
+
+The word does three jobs here; the config keys are deliberately distinct:
+
+1. **Block residual** — the ConvNeXt skip. Paper §3.2.1, always on, both arms.
+2. **Global residual** (`model.global_residual`) — the paper's full-step residual
+   prediction. In DLWP-HPX the network predicts the *change over a time step*,
+   added to the input state ("similar to the discretization of time derivatives
+   when solving partial or ordinary differential equations"). The SR task has no
+   time step, so the same idea is applied across *scale*: the net predicts the
+   correction from the upsampled coarse field to the fine field. On in the
+   deterministic model; forced **off** in the diffusion model, where the output
+   is the noise ε and adding the input would be meaningless.
+3. **Diffusion residual** (`models/hpx_residual.py`) — the CorrDiff-style target
+   `y − mean_field` that the DDPM chain models. Different mechanism, but the
+   same instinct as the paper's: predict the departure from a cheap estimate
+   rather than the absolute field.
 
 A practical bonus of the mesh, emphasized by the paper: HEALPix pixels are
 **equal-area**, so the plain pixel MSE loss and all mesh-space metrics are
