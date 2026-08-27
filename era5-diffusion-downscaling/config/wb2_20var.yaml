@@ -132,10 +132,22 @@ residual:
   n_steps: 100
 
 train:
-  batch_size: 20                 # the ladder constant for ALL 20-var arms: batch
-                                 # 24 filled the 24GB card with the baseline alone
-                                 # (24.1GB), leaving no room for the geo arms —
-                                 # amp stays off in this project
+  # LADDER CONSTANT for ALL 20-var arms on BriCS: global batch 128 = 32 per
+  # process x 4 GH200s. batch_size is PER PROCESS under torchrun, so the binding
+  # quantity is the GLOBAL batch — the same 32 on one GPU is global 32, a
+  # different experiment. Every arm must use 32 AND 4 GPUs or the comparison is
+  # confounded by batch, which changes optimizer steps per epoch and gradient
+  # noise, hence converged quality.
+  #
+  # Measured on a 96 GB GH200 (scripts/bench_batch.py, flow+geo, bf16): batch 32
+  # = 24.9 GiB and 139 samp/s; 96 = 68 GiB and 163 samp/s. The extra 17% is not
+  # worth it — 96 would make the global batch 384 against the 80 this lr was
+  # tuned at, and 2e-4 already collapsed this model. 32 keeps ~200 epochs near
+  # 3 h on one node, inside the 24 h walltime.
+  #
+  # The previous constant was 20, set by a 24 GB card that no longer applies;
+  # no 20-var checkpoints existed when it changed.
+  batch_size: 32
   epochs: 200
   lr: 1.0e-4                     # 2e-4 (the width-64 value) collapses the width-128
                                  # model to the trivial loss=1 solution by epoch ~2;
@@ -143,10 +155,11 @@ train:
   weight_decay: 0.0
   grad_clip: 1.0
   amp: false
-  # off | fp16 | bf16 (CLI: --amp-dtype). bf16 is the one to use on GH200/H100:
-  # fp32's exponent range so no loss scaling, ~2x throughput and ~half the
-  # activation memory. Legacy `amp: true` above still means fp16.
-  amp_dtype: off
+  # off | fp16 | bf16 (CLI: --amp-dtype). Part of the ladder constant: bf16 for
+  # every arm. Measured +51% throughput over fp32 at matched batch (182.9 vs
+  # 121.0 samp/s) with LESS memory, and unlike a bigger batch it does not touch
+  # the optimization regime. Legacy `amp: true` above still means fp16.
+  amp_dtype: bf16
   ema_decay: 0.999
   num_workers: 4
   log_every: 50
