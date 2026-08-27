@@ -43,14 +43,40 @@ def _atomic_save(obj, path: Path):
 
 
 @torch.no_grad()
-def validate(model, diffusion, mean_field, loader, ratio, device, seed=1234):
+def estimate_residual_scale(mean_field, loader, ratio, device, n_batches=16):
+    """RMS of the residual y - mean(x), used to rescale x0 to ~unit variance.
+
+    The DDPM schedule assumes x0 has roughly unit variance. A good deterministic
+    mean leaves a SMALL residual (measured here: ~0.022 in normalized units for
+    the t2m HPX256 regressor), and feeding that to an unscaled schedule leaves
+    over 99% of timesteps at signal-to-noise << 1 — a regime where the
+    loss-minimising prediction is the trivial eps = x_t / sqrt(1 - abar_t),
+    computable from the input alone. Dividing the residual by this scalar
+    restores a usable SNR range across the schedule; sampling multiplies it
+    back (models/hpx_diffusion.py sample(residual_scale=...)).
+    """
+    s = torch.zeros((), device=device, dtype=torch.float64)
+    n = 0
+    for i, y in enumerate(loader):
+        if i >= n_batches:
+            break
+        y = y.to(device, non_blocking=True)
+        r = y - mean_field(degrade_faces(y, ratio))
+        s += (r.double() ** 2).sum()
+        n += r.numel()
+    return float((s / max(n, 1)).sqrt())
+
+
+@torch.no_grad()
+def validate(model, diffusion, mean_field, loader, ratio, device,
+             res_scale=1.0, seed=1234):
     """Mean DDPM noise loss with fixed t/noise per batch (comparable across epochs)."""
     model.eval()
     total = n = 0.0
     for bi, y in enumerate(loader):
         y = y.to(device, non_blocking=True)
         mean = mean_field(degrade_faces(y, ratio))
-        x0 = y - mean
+        x0 = (y - mean) / res_scale
         g = torch.Generator(device="cpu").manual_seed(seed + bi)
         t = torch.randint(1, diffusion.timesteps + 1, (y.shape[0],),
                           generator=g).to(device)
@@ -117,6 +143,17 @@ def main():
     else:
         print("frozen mean: seam-aware bilinear upsampling")
 
+    units = cfg["data"].get("units", "phys")
+    res_scale = rc.get("scale")
+    if res_scale is None:
+        res_scale = estimate_residual_scale(mean_field, loader, ratio, device)
+    res_scale = float(res_scale)
+    if not res_scale > 0:
+        raise ValueError(f"residual scale must be positive, got {res_scale}")
+    print(f"residual scale: {res_scale:.5f} normalized "
+          f"({res_scale * normalizer.std:.4f} {units}) — the chain models "
+          f"(y - mean)/{res_scale:.5f}, so x0 has ~unit variance")
+
     diffusion = build_diffusion(cfg).to(device)
     model = build_residual_model(cfg).to(device)
     ema = EMA(model, decay=tc.get("ema_decay", 0.999))
@@ -156,6 +193,12 @@ def main():
         start_epoch = int(ck["epoch"]) + 1
         step = int(ck.get("step", 0))
         best_val = float(ck.get("best_val", ck.get("val_loss", float("inf"))))
+        # the target definition must not change mid-run
+        ck_scale = float(ck.get("residual_scale", 1.0))
+        if abs(ck_scale - res_scale) > 1e-6 * max(1.0, ck_scale):
+            print(f"  note: using the checkpoint's residual scale {ck_scale:.5f} "
+                  f"(this run estimated {res_scale:.5f})")
+            res_scale = ck_scale
         print(f"resumed {rpath}: starting epoch {start_epoch}, best {best_val:.5f}")
 
     running, running_n = 0.0, 0
@@ -167,7 +210,7 @@ def main():
             y = y.to(device, non_blocking=True)
             lf_up = degrade_faces(y, ratio)
             mean = mean_field(lf_up)
-            x0 = y - mean                      # the residual the chain models
+            x0 = (y - mean) / res_scale        # ~unit-variance residual target
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss = diffusion.training_loss(model, x0, cond=(mean,))
             if not torch.isfinite(loss):
@@ -197,7 +240,7 @@ def main():
             sched.step()
 
         val_loss = validate(ema.shadow, diffusion, mean_field, val_loader,
-                            ratio, device)
+                            ratio, device, res_scale)
         print(f"epoch {epoch:03d} | val eps mse (EMA) {val_loss:.5f}")
         if wb_run is not None:
             wb_run.log({"val/eps_mse": val_loss, "epoch": epoch}, step=step)
@@ -211,6 +254,7 @@ def main():
             "model": model.state_dict(), "ema": ema.state_dict(),
             "config": cfg, "epoch": epoch, "val_loss": val_loss,
             "mean_kind": mean_kind, "mean_ckpt": str(mean_ckpt or ""),
+            "residual_scale": res_scale,
             "norm_mean": normalizer.mean, "norm_std": normalizer.std,
             "opt": opt.state_dict(),
             "sched": sched.state_dict() if sched is not None else None,

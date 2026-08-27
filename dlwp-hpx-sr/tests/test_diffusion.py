@@ -149,6 +149,50 @@ def test_sampling_is_seeded_and_stochastic():
     assert not torch.allclose(a, c, atol=1e-6)  # different seed -> ensemble member
 
 
+def test_schedule_has_usable_snr_for_unit_variance_x0():
+    """The schedule must carry signal over a useful span of timesteps.
+
+    Regression test for a real defect: the chain was trained on the RAW
+    residual (std ~0.022 for the t2m regressor), which put >99% of timesteps at
+    SNR << 1 — the regime where predicting the noise is trivially
+    eps = x_t/sqrt(1-abar_t) and nothing about the field is learned. Training
+    now divides by the residual RMS, and this test pins the property that made
+    the bug detectable: with unit-variance x0 a large fraction of the schedule
+    is informative, with the tiny raw residual almost none of it is.
+    """
+    d = HPXGaussianDiffusion(**CFG["diffusion"])
+    ab = d.alphas_cumprod[1:]
+    snr = lambda sigma: (sigma ** 2 * ab / (1 - ab).clamp(min=1e-12))
+    frac_unit = float((snr(1.0) > 1.0).float().mean())
+    frac_raw = float((snr(0.022) > 1.0).float().mean())
+    assert frac_unit > 0.25, f"only {frac_unit:.1%} of timesteps informative"
+    assert frac_raw < 0.05, f"raw-residual sanity check wrong: {frac_raw:.1%}"
+
+
+def test_residual_scale_roundtrip_and_projection():
+    """Sampling with residual_scale composes correctly and stays consistent."""
+    torch.manual_seed(0)
+    model = build_residual_model(CFG)
+    d = HPXGaussianDiffusion(**CFG["diffusion"])
+    y = _field(seed=14)
+    lf, mean = coarsen_faces(y, RATIO), degrade_faces(y, RATIO)
+    scale = 0.05
+    out = d.sample(model, mean, lf, RATIO, n_steps=5, project=True,
+                   residual_scale=scale,
+                   generator=torch.Generator().manual_seed(3))
+    assert out.shape == y.shape and torch.isfinite(out).all()
+    # the projection guarantee must survive the rescaling
+    assert torch.allclose(coarsen_faces(out, RATIO), lf, atol=1e-4)
+    # and the scale must actually change the composed field
+    out1 = d.sample(model, mean, lf, RATIO, n_steps=5, project=False,
+                    residual_scale=scale,
+                    generator=torch.Generator().manual_seed(3))
+    out2 = d.sample(model, mean, lf, RATIO, n_steps=5, project=False,
+                    residual_scale=2 * scale,
+                    generator=torch.Generator().manual_seed(3))
+    assert torch.allclose(out2 - mean, 2 * (out1 - mean), atol=1e-5)
+
+
 def test_bilinear_mean_field():
     """The Phase-A mean is a real seam-aware upsample of the coarse field."""
     mf = MeanField("bilinear", RATIO, nside=NSIDE)

@@ -35,6 +35,13 @@ sr:
 residual:
   mean: learned                      # learned | bilinear (--mean overrides)
   mean_ckpt: checkpoints/t2m_hpx256/best.pt   # frozen SR model (Phase B)
+  scale: null                        # null -> measured from the train set.
+                                     # The chain models (y - mean)/scale so x0
+                                     # has ~unit variance, which is what the
+                                     # beta schedule assumes. Unscaled, the
+                                     # learned-mean residual (~0.022) leaves
+                                     # >99% of timesteps at SNR << 1, where
+                                     # predicting the noise is trivial.
 
 diffusion:
   timesteps: 1000

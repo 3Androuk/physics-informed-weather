@@ -110,19 +110,24 @@ class HPXGaussianDiffusion(nn.Module):
     def sample(self, model: nn.Module, mean_field: torch.Tensor, lf: torch.Tensor,
                ratio: int, n_steps: int = 100, eta: float = 0.0,
                project: bool = True, cond=None, generator=None,
+               residual_scale: float = 1.0,
                progress: bool = False) -> torch.Tensor:
         """Reconstruct a full field from pure noise, conditioned on `mean_field`.
 
-        The chain models the RESIDUAL x0 = y - mean_field; the returned field is
-        the composed reconstruction mean_field + x0. With project=True every
-        step's x0 estimate is corrected so that the composed field's coarse
-        block averages equal the observation `lf` exactly.
+        The chain models the SCALED residual x0 = (y - mean_field) /
+        residual_scale; the returned field is mean_field + residual_scale * x0.
+        With project=True every step's estimate is corrected so that the
+        composed field's coarse block averages equal the observation `lf`
+        exactly.
 
         Args:
             mean_field: (B,12,C,F,F) deterministic mean prediction (conditioning).
             lf: (B,12,C,F/r,F/r) observed coarse field.
             n_steps: DDIM subsequence length (<= timesteps).
             eta: DDIM stochasticity; 0 = deterministic, as in the paper.
+            residual_scale: the std the residual was divided by in training
+                (checkpoint key "residual_scale"). Must match, or the composed
+                field is wrong by that factor.
         Returns:
             (B,12,C,F,F) reconstruction in the same (normalized) units.
         """
@@ -148,9 +153,10 @@ class HPXGaussianDiffusion(nn.Module):
 
             x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
             if project:
-                # project the COMPOSED field, then return to residual space
-                composed = project_faces(mean_field + x0_pred, lf, ratio)
-                x0_pred = composed - mean_field
+                # project the COMPOSED field, then return to scaled-residual space
+                composed = project_faces(
+                    mean_field + residual_scale * x0_pred, lf, ratio)
+                x0_pred = (composed - mean_field) / residual_scale
             sigma = eta * (
                 ((1 - a_prev) / (1 - a_i)).clamp(min=0).sqrt()
                 * (1 - a_i / a_prev).clamp(min=0).sqrt())
@@ -160,7 +166,7 @@ class HPXGaussianDiffusion(nn.Module):
                 x = x + sigma * torch.randn(x.shape, device=device,
                                             generator=generator, dtype=x.dtype)
 
-        out = mean_field + x
+        out = mean_field + residual_scale * x
         return project_faces(out, lf, ratio) if project else out
 
 

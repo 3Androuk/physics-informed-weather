@@ -79,6 +79,8 @@ def main():
     diffusion = build_diffusion(ckpt["config"]).to(device)
     mean_field = load_mean_field(ckpt["mean_kind"], ratio, nside,
                                  ckpt.get("mean_ckpt") or None, device)
+    # must match training exactly, or the composed field is off by this factor
+    res_scale = float(ckpt.get("residual_scale", 1.0))
     print(f"Loaded {ckpt_path} (epoch {ckpt['epoch']}, val eps mse "
           f"{ckpt['val_loss']:.5f}, {'EMA' if use_ema else 'raw'} weights) "
           f"| mean: {ckpt['mean_kind']}")
@@ -88,7 +90,8 @@ def main():
     if args.n_test_samples:
         n = min(args.n_test_samples, len(ds))
     print(f"Sampling {n}/{len(ds)} test fields | {n_steps} DDIM steps | "
-          f"eta {ec['eta']} | project {project} | ensemble {n_members}")
+          f"eta {ec['eta']} | project {project} | ensemble {n_members} | "
+          f"residual scale {res_scale:.5f}")
 
     _, plat = pixel_lonlat_deg(nside)
     lat_faces = nest_to_faces(plat, nside)
@@ -124,7 +127,7 @@ def main():
                     args.seed + 1000 * m_i + start)
                 members.append(diffusion.sample(
                     model, mean, lf, ratio, n_steps=n_steps, eta=ec["eta"],
-                    project=project, generator=g))
+                    project=project, generator=g, residual_scale=res_scale))
             t_sample += time.time() - t0
             stack = torch.stack(members)                        # (M,B,12,1,F,F)
             pred = stack.mean(0)
@@ -155,7 +158,7 @@ def main():
     metrics = {"n_samples": n, "ratio": ratio, "nside": nside,
                "units": units, "n_steps": n_steps, "eta": ec["eta"],
                "project": project, "ensemble": n_members,
-               "mean_kind": ckpt["mean_kind"],
+               "mean_kind": ckpt["mean_kind"], "residual_scale": res_scale,
                "seconds_per_field": t_sample / max(n, 1),
                "data_consistency_max_abs": dc_max}
     if n_members > 1:
