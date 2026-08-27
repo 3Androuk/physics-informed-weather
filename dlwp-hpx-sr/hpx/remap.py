@@ -95,7 +95,12 @@ class LatLonToHPXSHT:
         lon = np.asarray(lon, dtype=np.float64)
         self.nlat, self.nlon = len(lat), len(lon)
         self.nthreads = int(nthreads)
-        self.lmax = int(lmax if lmax is not None else 2 * self.nside)
+        # The usable band limit is whichever of the two grids runs out first:
+        # the mesh (~2*nside) or the source grid (nlat - 1). When the mesh is
+        # the finer of the two (HPX512 vs 0.25 deg) nothing is truncated at all
+        # and the forward step becomes lossless.
+        self.lmax = int(lmax if lmax is not None
+                        else min(2 * self.nside, self.nlat - 1))
 
         ascending = lat[0] < lat[-1]
         poles = abs(abs(lat[0]) - 90.0) < 1e-6 and abs(abs(lat[-1]) - 90.0) < 1e-6
