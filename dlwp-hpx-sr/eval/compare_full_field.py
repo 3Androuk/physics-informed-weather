@@ -39,7 +39,7 @@ from data.dataset import Normalizer  # noqa: E402
 from data.degrade import degrade_faces  # noqa: E402
 from data.download_era5 import _open_da  # noqa: E402
 from eval.metrics import l2_norm, spectrum_log_l1  # noqa: E402
-from hpx.remap import hpx_to_latlon  # noqa: E402
+from hpx.remap import hpx_to_latlon, hpx_to_latlon_sht  # noqa: E402
 from models.hpx_unet import build_model  # noqa: E402
 from utils import ensure_dir, get_device, load_config  # noqa: E402
 
@@ -63,6 +63,10 @@ def main():
                     help="crop_to_multiple alignment used by the sibling run")
     ap.add_argument("--checkpoint", default=None,
                     help="override eval.checkpoint (default best.pt)")
+    ap.add_argument("--remap", choices=["bilinear", "sht"], default="bilinear",
+                    help="mesh -> lat-lon method: plain spherical bilinear, or "
+                         "spherical-harmonic resampling (band-limited analysis "
+                         "+ synthesis at 4x mesh resolution)")
     ap.add_argument("--timeout", type=int, default=120)
     args = ap.parse_args()
 
@@ -112,9 +116,10 @@ def main():
         pred = torch.cat(preds)
     pred_K = normalizer.decode(pred)[:, :, 0].numpy()            # (N, 12, F, F)
 
-    print("remapping mesh -> band grid ...")
-    pred_ll = hpx_to_latlon(pred_K, band_lat, band_lon)          # (N, H_band, W)
-    floor_ll = hpx_to_latlon(y_faces, band_lat, band_lon)        # remap floor
+    remap_fn = hpx_to_latlon if args.remap == "bilinear" else hpx_to_latlon_sht
+    print(f"remapping mesh -> band grid ({args.remap}) ...")
+    pred_ll = remap_fn(pred_K, band_lat, band_lon)               # (N, H_band, W)
+    floor_ll = remap_fn(y_faces, band_lat, band_lon)             # remap floor
 
     # ── Sibling-style bicubic from the TRUE lat-lon field ─────────────────
     t = torch.from_numpy(np.ascontiguousarray(crop_to_multiple(truth, args.align)))[:, None]
@@ -128,14 +133,15 @@ def main():
         "HPX truth remap floor": crop_to_multiple(floor_ll, args.align),
     }
     out = {"n_fields": int(args.n_fields), "field_idxs": [int(i) for i in idxs],
-           "grid": list(truth_c.shape[-2:]), "ratio": ratio}
+           "grid": list(truth_c.shape[-2:]), "ratio": ratio, "remap": args.remap}
     for name, rec in rows.items():
         out[name] = {"l2": l2_norm(rec, truth_c),
                      "spectrum_log_l1": spectrum_log_l1(rec, truth_c)}
         print(f"{name:24s} l2 {out[name]['l2']:.4f} K | "
               f"spec {out[name]['spectrum_log_l1']:.4f}")
 
-    path = Path(results_dir) / "compare_full_field.json"
+    suffix = "" if args.remap == "bilinear" else f"_{args.remap}"
+    path = Path(results_dir) / f"compare_full_field{suffix}.json"
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"-> {path}")

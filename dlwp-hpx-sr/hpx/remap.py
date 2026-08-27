@@ -84,3 +84,37 @@ def hpx_to_latlon(faces: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> np.nda
         for m in flat
     ]).astype(np.float32)
     return out.reshape(faces.shape[:-3] + lon2.shape)
+
+
+def hpx_to_latlon_sht(faces: np.ndarray, lat: np.ndarray, lon: np.ndarray,
+                      lmax: int | None = None, nside_up: int | None = None) -> np.ndarray:
+    """Spherical-harmonic mesh -> lat-lon resampling (same signature as
+    hpx_to_latlon).
+
+    Treats the field as band-limited on the sphere: analysis on the mesh
+    (healpy map2alm, lmax = 3*nside - 1 by default), harmonic synthesis onto a
+    `nside_up` (default 4*nside) mesh, then interpolation *there*, where the
+    mesh oversamples the target grid ~4x and bilinear error is ~16x smaller
+    than interpolating at the native resolution. Direct plain bilinear at
+    critical sampling (HPX256 vs 0.25 deg) is the dominant term of the remap
+    floor; this route removes most of it with zero learned parameters.
+    """
+    import healpy as hp
+
+    faces = np.asarray(faces)
+    nside = check_nside(faces.shape[-1])
+    lmax = int(lmax or 3 * nside - 1)
+    nside_up = int(nside_up or 4 * nside)
+    theta = np.deg2rad(90.0 - np.asarray(lat, dtype=np.float64))   # colatitude
+    phi = np.deg2rad(np.asarray(lon, dtype=np.float64) % 360.0)
+    th2, ph2 = np.meshgrid(theta, phi, indexing="ij")
+
+    flat = faces_to_nest(faces, nside).reshape(-1, 12 * nside * nside)
+    out = []
+    for m in flat:
+        ring = hp.reorder(m.astype(np.float64), n2r=True)
+        alm = hp.map2alm(ring, lmax=lmax, iter=3)
+        fine = hp.alm2map(alm, nside=nside_up, lmax=lmax)
+        out.append(hp.get_interp_val(fine, th2.ravel(), ph2.ravel())
+                   .reshape(th2.shape).astype(np.float32))
+    return np.stack(out).reshape(faces.shape[:-3] + th2.shape)
