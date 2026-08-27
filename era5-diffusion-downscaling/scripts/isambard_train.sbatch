@@ -27,7 +27,14 @@
 #SBATCH --nodes=1
 #SBATCH --gpus=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --time=24:00:00
+# NOT the 24h QoS maximum, deliberately. Requested walltime is a SCHEDULING
+# constraint, not a cost — you are billed for elapsed time either way — and
+# backfill can only place a job in a gap that fits its REQUESTED limit. On a
+# ~97%-full cluster, 6h gaps are common and 24h gaps are rare, so asking for the
+# maximum can leave a 3h job queued for hours to buy nothing. Overrunning is
+# safe: the USR1 handler below chains a continuation from the last per-epoch
+# checkpoint. Raise it with `sbatch --time=...`, which overrides this line.
+#SBATCH --time=06:00:00
 #SBATCH --signal=B:USR1@600
 #SBATCH --output=%x-%j.out
 
