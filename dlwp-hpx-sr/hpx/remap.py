@@ -99,8 +99,9 @@ class LatLonToHPXSHT:
         # the mesh (~2*nside) or the source grid (nlat - 1). When the mesh is
         # the finer of the two (HPX512 vs 0.25 deg) nothing is truncated at all
         # and the forward step becomes lossless.
+        # ducc0's Clenshaw-Curtis analysis needs ntheta >= lmax + 2 rings.
         self.lmax = int(lmax if lmax is not None
-                        else min(2 * self.nside, self.nlat - 1))
+                        else min(2 * self.nside, self.nlat - 2))
 
         ascending = lat[0] < lat[-1]
         poles = abs(abs(lat[0]) - 90.0) < 1e-6 and abs(abs(lat[-1]) - 90.0) < 1e-6
@@ -112,9 +113,9 @@ class LatLonToHPXSHT:
         dlon = np.diff(lon)
         if not np.allclose(dlon, dlon[0], atol=1e-6) or abs(lon[0]) > 1e-6:
             raise ValueError("SHT remap needs longitudes equidistant from 0")
-        if self.lmax > self.nlat - 1:
-            raise ValueError(f"lmax {self.lmax} exceeds the grid's band limit "
-                             f"{self.nlat - 1}")
+        if self.lmax > self.nlat - 2:
+            raise ValueError(f"lmax {self.lmax} exceeds what {self.nlat} rings "
+                             f"support for exact CC analysis ({self.nlat - 2})")
         # ducc0 CC geometry orders rings by colatitude: north pole first
         self.flip = bool(ascending)
 
