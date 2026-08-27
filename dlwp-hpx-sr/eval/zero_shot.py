@@ -96,7 +96,11 @@ def main():
 
     ds = HPXDataset(hpx_dir / "test.npy", normalizer)
     n = min(args.n_test_samples, len(ds))
-    print(f"{n}/{len(ds)} test fields | ratios {args.ratios} | nside {nside}")
+    # spread over the whole test period: the first N fields are one contiguous
+    # winter month, which biases absolute scores by several percent
+    sel = np.linspace(0, len(ds) - 1, n).astype(int)
+    print(f"{n}/{len(ds)} test fields (spread over the test period) | "
+          f"ratios {args.ratios} | nside {nside}")
 
     cache = {}
     out = {"checkpoint": str(ckpt_path), "native_ratio": native,
@@ -113,8 +117,8 @@ def main():
             nside, load_at_nside(ckpt, nside, device=device))
         with torch.no_grad():
             for start in range(0, n, args.batch_size):
-                idx = range(start, min(start + args.batch_size, n))
-                y = torch.stack([ds[i] for i in idx]).to(device)
+                idx = sel[start:start + args.batch_size]
+                y = torch.stack([ds[int(i)] for i in idx]).to(device)
                 lf = coarsen_faces(y, ratio)
                 preds = {
                     # Ekström-style: native ratio, then interpolate
