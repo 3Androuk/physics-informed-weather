@@ -227,5 +227,37 @@ def build_model(cfg: dict, use_time: bool = False,
     )
 
 
+def load_at_nside(ckpt: dict, nside: int, builder=None, device="cpu",
+                  **builder_kwargs) -> nn.Module:
+    """Rebuild a checkpoint's model at a DIFFERENT mesh resolution.
+
+    Convolution weights do not depend on spatial size, and the only
+    size-dependent state in this architecture is the HEALPix halo index maps,
+    which are derived from mesh topology rather than learned. So one checkpoint
+    runs at any level of the HEALPix ladder.
+
+    That is what makes the zero-shot protocol of Ekström et al. (2025,
+    arXiv:2409.13955) available without retraining: run the network at the
+    ratio it was trained for — on a correspondingly coarser mesh, where the
+    input's block structure matches training — then cover the remaining factor
+    with parameter-free interpolation. The ladder gives exact powers of two, so
+    no arbitrary regridding is involved.
+
+    Caveat worth testing rather than assuming: this presumes scale-similarity.
+    Atmospheric spectra are not scale-invariant, so a model trained to
+    synthesize structure at 0.25 deg is not automatically right for 0.5 deg.
+    """
+    cfg = {**ckpt["config"], "hpx": {**ckpt["config"]["hpx"], "nside": int(nside)}}
+    model = (builder or build_model)(cfg, **builder_kwargs)
+    # padding index buffers are topology-derived and size-specific: drop them
+    state = {k: v for k, v in ckpt["model"].items() if "gather_idx" not in k}
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    stray = [k for k in missing if "gather_idx" not in k]
+    if stray or unexpected:
+        raise RuntimeError(f"weight transfer to nside {nside} failed; "
+                           f"missing {stray}, unexpected {list(unexpected)}")
+    return model.to(device).eval()
+
+
 def count_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
