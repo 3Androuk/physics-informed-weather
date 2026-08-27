@@ -1,0 +1,89 @@
+# Sphere-native residual diffusion: the DLWP-HPX backbone as a DDPM noise
+# predictor on the HEALPix mesh (models/hpx_diffusion.py).
+#
+# Same data, split, resolution and 4x ratio as config/default.yaml, so the
+# diffusion model, the deterministic SR model and the sibling project's
+# tiled/fused patch diffusion all answer the same question.
+#
+# The chain models the RESIDUAL against a frozen deterministic mean:
+#   residual.mean: learned  -> a trained train_sr.py checkpoint (Phase B)
+#   residual.mean: bilinear -> seam-aware bilinear upsampling (Phase A)
+
+seed: 42
+
+paths:
+  hpx_dir: datasets/hpx_t2m_256      # shared with config/default.yaml
+  ckpt_dir: checkpoints/t2m_hpx256_diffusion
+  results_dir: results/t2m_hpx256_diffusion
+
+data:
+  era5_zarr: "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
+  gcs_token: anon
+  variable: 2m_temperature
+  level: null
+  units: "K"
+  train_years: [2007, 2015]
+  test_years: [2016, 2017]
+  time_stride: 4
+
+hpx:
+  nside: 256
+
+sr:
+  ratio: 4
+
+residual:
+  mean: learned                      # learned | bilinear (--mean overrides)
+  mean_ckpt: checkpoints/t2m_hpx256/best.pt   # frozen SR model (Phase B)
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: cosine              # gentler at high t than linear for residuals
+  beta_start: 1.0e-4                 # (used by the linear schedule only)
+  beta_end: 2.0e-2
+
+model:
+  in_channels: 1                     # +1 conditioning channel added internally
+  out_channels: 1                    # predicts the noise
+  channels: [64, 128, 256]
+  dilations: [1, 2, 4]
+  blocks_per_level: 2
+  expansion: 4
+  gelu_cap: 10.0
+  global_residual: false             # meaningless for a noise predictor
+  grad_checkpoint: true
+
+train:
+  batch_size: 2                      # as in default.yaml; the frozen mean adds
+  accum_steps: 4                     # ~1GB, so keep micro-batch 2 + accumulation
+  epochs: 200                        # diffusion needs far more epochs than the
+                                     # regressor — start smaller to sanity-check
+  lr: 2.0e-4
+  weight_decay: 1.0e-5
+  cosine_lr: true
+  grad_clip: 1.0
+  amp: false                         # fp32 (fp16 NaN'ed in the sibling project)
+  ema_decay: 0.999                   # samples are drawn from the EMA weights
+  val_fraction: 0.1
+  num_workers: 4
+  log_every: 50
+  ckpt_every_epochs: 1
+
+eval:
+  checkpoint: best.pt
+  use_ema: true                      # sample from the EMA weights
+  n_test_samples: 64                 # sampling is ~n_steps forwards per field
+  batch_size: 2
+  n_steps: 100                       # DDIM subsequence length
+  eta: 0.0                           # 0 = deterministic DDIM
+  project: true                      # exact mesh data-consistency projection
+  ensemble: 1                        # >1 draws several members per field
+  hist_bins: 100
+  n_map_samples: 3
+  lat_bands: [[-90, -60], [-60, -20], [-20, 20], [20, 60], [60, 90]]
+
+wandb:
+  enabled: false
+  project: dlwp-hpx-sr
+  entity: null
+  name: null
