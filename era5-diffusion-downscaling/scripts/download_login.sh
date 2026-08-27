@@ -4,9 +4,10 @@
 #   scripts/download_login.sh config/wb2_20var.yaml
 #
 # WHY THE LOGIN NODE: Isambard-AI has no CPU-only partition, so a Slurm download
-# would hold GPUs — billed in node-hours — while doing nothing but wait on the
-# network. Login nodes are not a Slurm allocation, so they should not be billed
-# at all (worth confirming against the project balance the first time). They do
+# would hold GPUs — billed proportionally, billing=72 per GPU-quarter-node —
+# while doing nothing but wait on the network. Login nodes are not a Slurm
+# allocation and produce no billing record at all (confirmed: hours of
+# downloading leave `sacct` empty). They do
 # cap each user at 4 GiB RAM (cgroup MemoryMax, measured), which shapes
 # everything below.
 #

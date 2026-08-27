@@ -10,12 +10,13 @@
 # train.train_diffusion, train.train_directmap, train.train_residual,
 # train.train_flow_matching, train.train_stochastic_interpolant.
 #
-# WHY A WHOLE NODE: BriCS bills in NODE-hours (the docs do not say whether a
-# partial-node job is charged for the whole node — check TRESBillingWeights via
-# `scontrol show partition`). Taking all 4 GH200s and running 4-way DDP means
-# every GPU billed is a GPU working, which is right under either rule. Note
-# scripts/train_multinode.sh defaults to 4 nodes x 1 GPU — right for a
-# 1-GPU-per-node cluster, four nodes' worth of billing here for the same 4 GPUs.
+# WHY 4 GPUS ON 1 NODE: billing is PROPORTIONAL to the share allocated, not per
+# whole node — measured, a 1-GPU job records billing=72 of a 288-core node. So
+# --gpus=4 costs 4x --gpus=1, and asking for four is only worth it because
+# 4-way DDP puts all four to work; it is not free. What this shape avoids is
+# scripts/train_multinode.sh's default of 4 nodes x 1 GPU, which bills the same
+# 288 while spreading the job over four machines and leaving 12 GPUs idle,
+# communicating over the network instead of NVLink.
 #
 # Env overrides:
 #   ERA5_VENV    path to the venv           (default $SLURM_SUBMIT_DIR/.venv)

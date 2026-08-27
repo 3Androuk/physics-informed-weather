@@ -317,13 +317,25 @@ serves machines with different GPU memory and core counts without being forked.
 
 Isambard-AI nodes are **4× GH200** (96 GB HBM each, 288 Grace cores, aarch64)
 and the site bills in **node-hours (NHR)**; the `interactive` reservation costs
-1.5× that. Whether a partial-node job is charged for the whole node is *not*
-stated in the BriCS docs — check `scontrol show partition` for
-`TRESBillingWeights`, and `sacct -o JobID,AllocTRES` for a finished job's
-`billing=` value, which settles it from the scheduler itself.
+1.5× that.
 
-Either way the guidance below holds: run 4-way DDP so all four GPUs do real
-work, and never hold a GPU node for work that does not use the GPUs.
+Billing is **proportional to the share allocated, not per whole node** — measured,
+since the BriCS docs do not state it. A 1-GPU job on a 288-core node records:
+
+```
+sacct -j <id> -X -o AllocTRES
+billing=72,cpu=72,gres/gpu=1,mem=115000M,node=1
+```
+
+72 of 288, i.e. exactly the quarter node it holds (`JobDefaults=DefCpuPerGPU=72,
+DefMemPerGPU=115000`). So `--gpus=4` costs **four times** `--gpus=1`, not the
+same. The rule is therefore *use every GPU you ask for*, not *always ask for
+four*: take 4 for DDP training, where all four do real work, and take as little
+as possible — or stay off Slurm entirely — for anything that does not compute.
+
+Data downloading is the clear case of the latter: it is network-bound, so it
+belongs on a login node, which is not a Slurm allocation and produces no billing
+record at all.
 
 ```bash
 # Whole node, all 4 GH200s, auto-chained across the 24h walltime limit
