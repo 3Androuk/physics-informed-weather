@@ -145,8 +145,14 @@ train:
   # tuned at, and 2e-4 already collapsed this model. 32 keeps ~200 epochs near
   # 3 h on one node, inside the 24 h walltime.
   #
+  # SELF-CONTAINED STUDY. These runs are NOT comparable with the RTX 3090 runs
+  # (single GPU, batch 20 -> global batch 20, fp32) and must not be pooled with
+  # them: global 128 vs 20 is 6.4x fewer optimizer steps per epoch at the same
+  # lr, and bf16 vs fp32 is a second independent difference. Either study is
+  # internally valid; mixing them is the only wrong answer. Report separately.
+  #
   # The previous constant was 20, set by a 24 GB card that no longer applies;
-  # no 20-var checkpoints existed when it changed.
+  # no 20-var checkpoints existed on BriCS when it changed.
   batch_size: 32
   epochs: 200
   lr: 1.0e-4                     # 2e-4 (the width-64 value) collapses the width-128
@@ -169,13 +175,16 @@ train:
 
 directmap:
   train_ratio: 4
-  batch_size: 20
+  # Matches train.batch_size: the ladder constant binds EVERY arm, including the
+  # regression mean. Left at 20 it would be the one arm confounded by batch.
+  batch_size: 32
   epochs: 200
   lr: 1.0e-4                     # 2e-4 (the width-64 value) collapses the width-128
                                  # model to the trivial loss=1 solution by epoch ~2;
                                  # halved with the standard width scaling
   grad_clip: 1.0
   amp: false
+  amp_dtype: bf16                # ladder constant — same precision as every arm
 
 sample:
   ddim_eta: 0.0
