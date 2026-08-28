@@ -97,14 +97,24 @@ def main():
 
         rmse = float(np.sqrt(((a - b) ** 2).mean()))
         mx = float(np.abs(a - b).max())
+        # restricted to the scoring band: lat-lon cell geometry is far less
+        # extreme away from the poles, so the mismatch should shrink there
+        from hpx.mesh import nest_to_faces, pixel_lonlat_deg
+        _, plat = pixel_lonlat_deg(nside // r)
+        band = nest_to_faces(np.abs(plat) <= 60.0, nside // r)
+        d = (a - b)[..., band]
+        rmse_band = float(np.sqrt((d ** 2).mean()))
+        mx_band = float(np.abs(d).max())
         # scale for context: spread of the coarse field itself
         spread = float(a.std())
-        out["ratios"][f"{r}x"] = {"rmse": rmse, "max_abs": mx,
+        out["ratios"][f"{r}x"] = {"rmse_global": rmse, "max_abs_global": mx,
+                                  "rmse_band60": rmse_band, "max_abs_band60": mx_band,
                                   "coarse_field_std": spread,
                                   "nside_coarse": nside // r,
                                   "latlon_coarse": list(cf.shape[1:])}
-        print(f"  {r}x -> HPX{nside // r} from {cf.shape[1]}x{cf.shape[2]} lat-lon: "
-              f"mismatch {rmse:.4f} {units} (max {mx:.3f}, field std {spread:.2f})")
+        print(f"  {r}x -> HPX{nside // r} from {cf.shape[1]}x{cf.shape[2]}: "
+              f"global {rmse:.4f} (max {mx:.2f}) | "
+              f"+-60 band {rmse_band:.4f} (max {mx_band:.2f}) {units}")
 
     path = Path(results_dir) / "deploy_mismatch.json"
     with open(path, "w") as f:
