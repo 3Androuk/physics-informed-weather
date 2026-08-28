@@ -90,7 +90,7 @@ class PatchDataset(Dataset):
                 hp = np.load(hp_path)
                 self.hpx_idx = hp["idx"]   # (L, H, W, 4) int64
                 self.hpx_w = hp["w"]       # (L, H, W, 4) float32
-            if geo_encoder in ("static", "hash_static"):
+            if geo_encoder in ("static", "hash_static", "xyz_static", "sinusoidal_static"):
                 sf = np.load(Path(coords_full_path).parent / "static_fields.npz")
                 self.static = sf["fields"]  # (S, H, W) float32, normalized
             if geo_encoder not in ("healpix", "static"):
@@ -123,7 +123,7 @@ class PatchDataset(Dataset):
         coords = torch.from_numpy(self._build_coords(
             self.lat_full[r:r + s], self.lon_full[c:c + s], altitude=alt
         ))
-        if self.geo_encoder == "hash_static":
+        if self.geo_encoder in ("hash_static", "xyz_static", "sinusoidal_static"):
             crop = np.ascontiguousarray(self.static[:, r:r + s, c:c + s])
             return x, torch.cat([coords, torch.from_numpy(crop).permute(1, 2, 0)],
                                 dim=-1)                        # (s, s, d + S)

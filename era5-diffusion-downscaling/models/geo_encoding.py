@@ -304,6 +304,37 @@ class HashStaticCombo(nn.Module):
         return torch.cat([self.hash(coords), static], dim=-1)
 
 
+class EncoderStaticCombo(nn.Module):
+    """Any coordinate encoder CONCATENATED with real static fields.
+
+    Generalizes HashStaticCombo to the PARAMETER-FREE coordinate encoders, so
+    the ablation can separate the three things the hash arm confounds:
+    position, physiography, and learned capacity.
+
+      xyz_static         position (linear) + physiography, zero parameters
+      sinusoidal_static  position (fixed multi-scale nonlinear) + physiography
+
+    sinusoidal_static is the tighter null for the hash grid: it matches the
+    grid's multi-scale nonlinear character and its embedding width without any
+    learned table, so a remaining hash gain cannot be explained as "the network
+    just needed better-conditioned positional features".
+
+    Payload (PatchDataset): (..., H, W, d + S) = [coords | static fields].
+    """
+
+    def __init__(self, base: nn.Module, input_dim: int, n_fields: int):
+        super().__init__()
+        self.base = base
+        self.d = input_dim
+        self.n_fields = n_fields
+        self.output_dim = base.output_dim + n_fields
+
+    def forward(self, payload):
+        coords = payload[..., : self.d]
+        static = payload[..., self.d:]
+        return torch.cat([self.base(coords), static], dim=-1)
+
+
 class LevelGate(nn.Module):
     """Noise-dependent per-level gating of a multiresolution geo embedding.
 
@@ -430,6 +461,12 @@ def build_geo_encoder(cfg: dict):
     if encoder == "static":
         return StaticFields(n_fields=len(g.get("static_fields",
                                                DEFAULT_STATIC_FIELDS)))
+    _COMBO_BASE = {"xyz_static": "xyz", "sinusoidal_static": "sinusoidal"}
+    if encoder in _COMBO_BASE:
+        base_cfg = {**cfg, "geo": {**g, "encoder": _COMBO_BASE[encoder]}}
+        return EncoderStaticCombo(
+            build_geo_encoder(base_cfg), input_dim=g.get("input_dim", 3),
+            n_fields=len(g.get("static_fields", DEFAULT_STATIC_FIELDS)))
     if encoder not in ("hash", "hash_static"):
         raise ValueError(f"unknown geo encoder: {encoder}")
     grid = MultiResHashGrid(

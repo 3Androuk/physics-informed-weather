@@ -88,7 +88,9 @@ def display_channel(cfg: dict) -> int:
 # unchanged).
 _ENCODER_TAG = {"hash": "", "healpix": "_hpx", "xyz": "_xyz",
                 "sinusoidal": "_sin", "static": "_static",
-                "hash_static": "_combo"}
+                "hash_static": "_combo",
+                "xyz_static": "_xyzstatic",
+                "sinusoidal_static": "_sinstatic"}
 
 
 def geo_suffix(cfg: dict) -> str:

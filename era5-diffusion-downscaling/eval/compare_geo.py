@@ -152,6 +152,14 @@ def main():
     if args.eta is not None:
         stem += f"_eta{args.eta:g}"
 
+    # Variable labels for per-channel metrics (multi-variable runs).
+    _vars = cfg["data"].get("variables")
+    if _vars:
+        var_names = [f"{v['name']}@{v['level']}" if v.get("level") is not None
+                     else v["name"] for v in _vars]
+    else:
+        var_names = [cfg["data"].get("variable", "field")]
+
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
     hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
@@ -168,9 +176,23 @@ def main():
         row = {}
         for name, p in preds.items():
             pp = normalizer.decode(p)
-            row[name] = {"l2": l2_norm(pp, hf_phys), "spectrum_log_l1": spectrum_log_l1(pp, hf_phys)}
+            # The physical-unit pooled metrics mix variables whose magnitudes
+            # differ by orders of magnitude (geopotential ~5e4 m2/s2 vs
+            # specific humidity ~1e-3), so on multi-variable runs "l2" is
+            # effectively a geopotential score. Read l2_normalized for the fair
+            # cross-variable summary and per_variable for the breakdown.
+            row[name] = {"l2": l2_norm(pp, hf_phys),
+                         "spectrum_log_l1": spectrum_log_l1(pp, hf_phys),
+                         "l2_normalized": l2_norm(p, hf.cpu())}
+            if pp.shape[1] == len(var_names) and len(var_names) > 1:
+                row[name]["per_variable"] = {
+                    vn: {"l2": l2_norm(pp[:, c:c + 1], hf_phys[:, c:c + 1]),
+                         "spectrum_log_l1": spectrum_log_l1(pp[:, c:c + 1],
+                                                            hf_phys[:, c:c + 1])}
+                    for c, vn in enumerate(var_names)}
             spectra[f"{name} {tag}"] = radial_power_spectrum(pp)
-            print(f"  {tag} {name:28s} | L2 {row[name]['l2']:.4f} | "
+            print(f"  {tag} {name:28s} | L2(norm) {row[name]['l2_normalized']:.4f} "
+                  f"| L2(phys,pooled) {row[name]['l2']:.4f} | "
                   f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
         table[tag] = row
         _qualitative(normalizer, hf, preds, ratio, rc,
