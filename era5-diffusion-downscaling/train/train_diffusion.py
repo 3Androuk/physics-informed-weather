@@ -149,6 +149,8 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
     guard = build_divergence_guard(tc)
+    best_ckpt_path = ckpt_dir / f"{stem}_best.pt"
+    best_val = float("inf")
     use_amp, amp_dtype = resolve_amp(tc, device.type)
     # A GradScaler exists for fp16's narrow exponent range; bf16 needs none.
     scaler = torch.amp.GradScaler(
@@ -303,9 +305,10 @@ def main():
         if guard is not None and broadcast_flag(reason is not None, dist):
             if dist.is_main:
                 print(f"DIVERGED at epoch {epoch}: {reason}\n"
-                      f"Stopping early — the last checkpoint at epoch {epoch} is "
-                      f"already written and is NOT usable. Rerun (a different "
-                      f"trajectory often survives) or lower the global batch / lr.",
+                      f"Stopping early. The rolling checkpoint holds the diverged "
+                      f"weights, but the pre-collapse state survives at "
+                      f"{best_ckpt_path} (val {best_val:.5f}) — evaluate or resume "
+                      f"from that, not from {ckpt_path}.",
                       flush=True)
             break
 
@@ -347,11 +350,24 @@ def main():
             if dist.is_main:
                 _save_ckpt(ckpt_path, raw_model, ema, opt, scaler, cfg,
                            normalizer, epoch, step)
+                # ... and keep the BEST-so-far separately. The rolling checkpoint
+                # above is overwritten every epoch, so a late collapse destroys
+                # every good weight that preceded it: the 20-var baseline was at
+                # val 0.01261 on epoch 89, collapsed on 92, and overwrote that
+                # state 109 more times. The _weights_finite check above does not
+                # help — those weights were finite, merely degenerate at loss 1.0.
+                v = epoch_metrics.get("val/loss")
+                if v is not None and v < best_val:
+                    best_val = v
+                    _save_ckpt(best_ckpt_path, raw_model, ema, opt, scaler, cfg,
+                               normalizer, epoch, step)
 
     if wb_run is not None:
         wb_run.finish()
     cleanup(dist)
     print(f"Done. Checkpoint -> {ckpt_path}")
+    if best_val < float("inf"):
+        print(f"Best (val {best_val:.5f}) -> {best_ckpt_path}")
 
 
 @torch.no_grad()
