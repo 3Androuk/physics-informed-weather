@@ -24,8 +24,41 @@ def _to_numpy(x) -> np.ndarray:
     return x               # (N, H, W)
 
 
+def l2_per_channel(pred, truth) -> list:
+    """Per-channel RMSE, one number per channel, in the inputs' own units.
+
+    Use this instead of pooling when the inputs are in PHYSICAL units. Averaging
+    physical RMSE across channels adds quantities with different units and lets
+    the largest-magnitude variable define the score: in the 20-variable config,
+    mean-sea-level pressure (~10^2 Pa error) and geopotential (~10^1 m2/s2)
+    supply ~90% of the mean while 2m temperature contributes under 1% and
+    specific humidity (~10^-4 kg/kg) contributes nothing measurable. Their
+    standard deviations span a factor of ~10^6.
+    """
+    p, t = np.asarray(_as_nchw(pred)), np.asarray(_as_nchw(truth))
+    return [float(np.sqrt(((p[:, c] - t[:, c]) ** 2).mean(axis=(-2, -1))).mean())
+            for c in range(p.shape[1])]
+
+
+def _as_nchw(x) -> np.ndarray:
+    """(N, C, H, W) float64, without collapsing the channel axis."""
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim == 2:
+        return x[None, None]
+    if x.ndim == 3:
+        return x[:, None]
+    return x
+
+
 def l2_norm(pred, truth) -> float:
-    """Mean over samples of per-sample RMSE = sqrt(mean_grid (pred - truth)^2)."""
+    """Mean over samples of per-sample RMSE = sqrt(mean_grid (pred - truth)^2).
+
+    Multi-channel inputs are pooled (channels treated as samples), which is only
+    meaningful in NORMALIZED units — see l2_per_channel for why physical-unit
+    pooling is dominated by whichever variable has the largest magnitude.
+    """
     p, t = _to_numpy(pred), _to_numpy(truth)
     per_sample = np.sqrt(((p - t) ** 2).mean(axis=(-2, -1)))
     return float(per_sample.mean())

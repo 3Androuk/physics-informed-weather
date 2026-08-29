@@ -33,10 +33,12 @@ import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
-from eval.metrics import radial_power_spectrum, spectrum_log_l1, l2_norm  # noqa: E402
+from eval.metrics import (l2_norm, l2_per_channel,  # noqa: E402
+                          radial_power_spectrum, spectrum_log_l1)
 from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
                                 reconstruct_diffusion)
-from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # noqa: E402
+from utils import (channel_labels, display_channel, ensure_dir,  # noqa: E402
+                   get_device, init_wandb, load_config, run_name)
 
 
 def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
@@ -166,12 +168,38 @@ def main():
             [reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
              for i in range(0, len(hf), args.batch)])
         row = {}
+        labels = channel_labels(cfg.get("data", {})) or ["ch0"]
+        disp = display_channel(cfg)
         for name, p in preds.items():
             pp = normalizer.decode(p)
-            row[name] = {"l2": l2_norm(pp, hf_phys), "spectrum_log_l1": spectrum_log_l1(pp, hf_phys)}
+            per_ch = l2_per_channel(pp, hf_phys)          # physical, per channel
+            row[name] = {
+                # Headline: the configured display channel, in ITS physical unit.
+                "l2_display": per_ch[disp] if disp < len(per_ch) else per_ch[0],
+                "display_channel": labels[disp] if disp < len(labels) else "ch0",
+                # Scale-fair pooled score: normalized units, so every channel
+                # contributes on equal footing regardless of its magnitude.
+                "l2_normalized": l2_norm(p, hf.cpu()),
+                # Kept for continuity with older tables, but it mixes units and
+                # is dominated by the largest-magnitude channel — do not headline.
+                "l2_physical_pooled": float(sum(per_ch) / len(per_ch)),
+                "l2_per_channel": {labels[i] if i < len(labels) else f"ch{i}": v
+                                   for i, v in enumerate(per_ch)},
+                # log-spectrum error is scale-invariant (a factor k shifts pred
+                # and truth alike), so pooling channels here IS legitimate.
+                "spectrum_log_l1": spectrum_log_l1(pp, hf_phys),
+            }
             spectra[f"{name} {tag}"] = radial_power_spectrum(pp)
-            print(f"  {tag} {name:28s} | L2 {row[name]['l2']:.4f} | "
-                  f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
+            r = row[name]
+            print(f"  {tag} {name:28s} | {r['display_channel']} L2 {r['l2_display']:.4f}"
+                  f" | norm-L2 {r['l2_normalized']:.4f}"
+                  f" | spec-logL1 {r['spectrum_log_l1']:.4f}")
+        # Per-channel detail, so it is visible which variables each arm helps.
+        for name in preds:
+            pc = row[name]["l2_per_channel"]
+            worst = sorted(pc.items(), key=lambda kv: -kv[1])[:3]
+            print(f"    {name:26s} largest physical RMSE: "
+                  + ", ".join(f"{k} {v:.3g}" for k, v in worst))
         table[tag] = row
         _qualitative(normalizer, hf, preds, ratio, rc,
                      results_dir / f"{stem}_qualitative_{tag}.png")
