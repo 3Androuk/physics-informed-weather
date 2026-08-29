@@ -149,7 +149,6 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
     guard = build_divergence_guard(tc)
-    best_ckpt_path = ckpt_dir / f"{stem}_best.pt"
     best_val = float("inf")
     use_amp, amp_dtype = resolve_amp(tc, device.type)
     # A GradScaler exists for fp16's narrow exponent range; bf16 needs none.
@@ -158,6 +157,8 @@ def main():
 
     start_epoch, step = 1, 0
     ckpt_path = ckpt_dir / ckpt_name
+    # Best-by-validation, kept beside the rolling checkpoint (see the save block).
+    best_ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_best{ckpt_path.suffix}")
     if args.resume and ckpt_path.exists():
         ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
