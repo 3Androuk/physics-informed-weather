@@ -86,7 +86,10 @@ def main():
     n = min(args.n_test_samples or ec["n_test_samples"] or len(ds), len(ds))
     recons = [r for r in sc["reconstructions"]
               if args.ratios is None or int(r["ratio"]) in args.ratios]
-    print(f"{n}/{len(ds)} test fields | ratios "
+    # spread over the test period: the first N fields are one contiguous
+    # winter month, which biases absolute scores by several percent
+    sel = np.linspace(0, len(ds) - 1, n).astype(int)
+    print(f"{n}/{len(ds)} test fields (spread over the test period) | ratios "
           f"{[r['ratio'] for r in recons]} | project {project} | stride {stride}")
 
     _, plat = pixel_lonlat_deg(nside)
@@ -117,8 +120,8 @@ def main():
 
         with torch.no_grad():
             for start in range(0, n, batch):
-                idx = range(start, min(start + batch, n))
-                y = torch.stack([ds[i] for i in idx]).to(device)
+                idx = sel[start:start + batch]
+                y = torch.stack([ds[int(i)] for i in idx]).to(device)
                 lf = coarsen_faces(y, ratio)
                 x_g = degrade_faces(y, ratio)      # nearest-upsampled guidance
 
