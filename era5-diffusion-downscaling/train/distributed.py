@@ -146,6 +146,22 @@ def wrap_model(model: torch.nn.Module, ctx: DistContext, cfg: dict | None = None
         find_unused_parameters=dcfg.get("find_unused_parameters", False))
 
 
+def broadcast_flag(flag: bool, ctx: DistContext) -> bool:
+    """Agree on a boolean across all ranks, rank 0 deciding.
+
+    Needed because validation runs on rank 0 ONLY (weights are identical, so one
+    process scoring the full set reproduces single-process values). A guard that
+    acted on rank 0's verdict alone would break out of the epoch loop there
+    while the other ranks blocked forever on the next collective — a hang is
+    worse than the runaway run the guard exists to stop.
+    """
+    if not ctx.enabled:
+        return flag
+    t = torch.tensor([1.0 if flag else 0.0], device=ctx.device)
+    td.broadcast(t, src=0)
+    return bool(t.item() > 0.5)
+
+
 def cleanup(ctx: DistContext) -> None:
     """Leave the process group (barrier first so rank 0 finishes writing)."""
     if ctx.enabled and td.is_initialized():

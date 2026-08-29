@@ -172,6 +172,17 @@ train:
   val_patches: 256
   ckpt_every_epochs: 1
   sample_every_epochs: 10
+  # Stop a run whose val loss has blown up and is not recovering. The 20-var
+  # no-geo baseline (job 6169725) trained healthily to epoch 89 (val 0.01261),
+  # collapsed to the trivial solution by 92 (0.99980), then ran 108 more epochs
+  # at full cost for a worthless checkpoint. patience>1 is essential: the same
+  # run spiked 6.4x at epoch 10 and recovered, so a single-epoch trigger would
+  # kill healthy runs.
+  divergence:
+    enabled: true
+    factor: 10.0                 # abort above this multiple of the best val loss
+    patience: 3                  # ... for this many CONSECUTIVE epochs
+    min_epochs: 5                # before this, "best so far" is not meaningful
 
 directmap:
   train_ratio: 4

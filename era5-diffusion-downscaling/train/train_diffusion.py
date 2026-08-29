@@ -25,11 +25,12 @@ from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
 from eval.metrics import spectrum_log_l1  # noqa: E402
 from models.diffusion import build_diffusion  # noqa: E402
 from models.unet import build_unet  # noqa: E402
-from train.distributed import (cleanup, init_distributed,  # noqa: E402
+from train.distributed import (broadcast_flag, cleanup,  # noqa: E402
+                               init_distributed,
                                make_train_loader, set_epoch, wrap_model)
 from train.ema import EMA  # noqa: E402
 from utils import (add_perf_args, apply_perf_overrides,  # noqa: E402
-                   resolve_amp,
+                   build_divergence_guard, resolve_amp,
                    channel_labels, display_channel, ensure_dir, geo_suffix,
                    init_wandb, load_config, run_name, set_seed)
 
@@ -147,6 +148,7 @@ def main():
     print(f"UNet params: {n_params:,}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
+    guard = build_divergence_guard(tc)
     use_amp, amp_dtype = resolve_amp(tc, device.type)
     # A GradScaler exists for fp16's narrow exponent range; bf16 needs none.
     scaler = torch.amp.GradScaler(
@@ -293,6 +295,20 @@ def main():
                 writer.add_scalar(k_, v_, step)
         if wb_run is not None:
             wb_run.log(epoch_metrics, step=step)
+        # Divergence guard. Only rank 0 has a val loss, so its verdict must be
+        # broadcast — breaking out on one rank alone would hang the rest.
+        reason = None
+        if guard is not None and "val/loss" in epoch_metrics:
+            reason = guard.update(epoch_metrics["val/loss"], epoch)
+        if guard is not None and broadcast_flag(reason is not None, dist):
+            if dist.is_main:
+                print(f"DIVERGED at epoch {epoch}: {reason}\n"
+                      f"Stopping early — the last checkpoint at epoch {epoch} is "
+                      f"already written and is NOT usable. Rerun (a different "
+                      f"trajectory often survives) or lower the global batch / lr.",
+                      flush=True)
+            break
+
         t_last_log = time.time()  # exclude val/sampling time from throughput
 
         if dist.is_main and epoch % tc["sample_every_epochs"] == 0:

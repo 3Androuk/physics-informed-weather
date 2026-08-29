@@ -1,5 +1,6 @@
 """Shared utilities: config loading, seeding, device, paths."""
 
+import math
 import os
 import random
 from pathlib import Path
@@ -100,6 +101,71 @@ def apply_perf_overrides(cfg: dict, args, batch_section: str = "train") -> dict:
         # already reads `amp`.
         cfg[batch_section]["amp_dtype"] = args.amp_dtype
     return cfg
+
+
+class DivergenceGuard:
+    """Stop a run whose validation loss has blown up and is not recovering.
+
+    Motivated by a real 200-epoch run (job 6169725, the 20-var no-geo baseline):
+    it trained healthily to epoch 89 (val 0.01261, better than either surviving
+    arm at that point), collapsed to the trivial solution by epoch 92
+    (val 0.99980), then trained 108 more epochs at full cost producing a
+    worthless checkpoint. Nothing in the trainer noticed. That is ~1.3 wasted
+    node-hours per occurrence on a cluster billed by the node-hour.
+
+    Fires only after `patience` CONSECUTIVE epochs above `factor` x the best
+    validation loss seen so far. The consecutive requirement matters: the same
+    run spiked to 0.18781 at epoch 10 (6.4x the then-best 0.02914) and recovered
+    completely, so a single-epoch trigger would have killed a healthy run.
+
+    `min_epochs` skips the early phase, where the loss is still falling fast and
+    "best so far" is not yet meaningful.
+    """
+
+    def __init__(self, factor: float = 10.0, patience: int = 3,
+                 min_epochs: int = 5):
+        self.factor = float(factor)
+        self.patience = int(patience)
+        self.min_epochs = int(min_epochs)
+        self.best = float("inf")
+        self.strikes = 0
+
+    def update(self, val_loss: float, epoch: int):
+        """Feed one epoch's validation loss.
+
+        Returns a human-readable reason string when the run should abort, else
+        None. Call on the rank that actually computes validation, then agree
+        across ranks with distributed.broadcast_flag — aborting on one rank
+        alone deadlocks the others at the next collective.
+        """
+        if val_loss is None or not math.isfinite(val_loss):
+            self.strikes += 1
+            if self.strikes >= self.patience:
+                return f"non-finite validation loss for {self.strikes} epochs"
+            return None
+        if epoch < self.min_epochs:
+            self.best = min(self.best, val_loss)
+            return None
+        threshold = self.factor * self.best
+        if val_loss > threshold:
+            self.strikes += 1
+            if self.strikes >= self.patience:
+                return (f"val loss {val_loss:.5f} exceeded {self.factor:g}x the best "
+                        f"({self.best:.5f}) for {self.strikes} consecutive epochs")
+        else:
+            self.strikes = 0
+            self.best = min(self.best, val_loss)
+        return None
+
+
+def build_divergence_guard(train_cfg: dict):
+    """DivergenceGuard from a config's `divergence` block; None when disabled."""
+    d = train_cfg.get("divergence", {})
+    if not d.get("enabled", True):
+        return None
+    return DivergenceGuard(factor=d.get("factor", 10.0),
+                           patience=d.get("patience", 3),
+                           min_epochs=d.get("min_epochs", 5))
 
 
 def set_seed(seed: int) -> None:
