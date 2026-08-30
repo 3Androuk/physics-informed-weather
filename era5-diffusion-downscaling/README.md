@@ -119,9 +119,47 @@ initialization ablations for both DDNM projections. Outputs are written to
 when `ddim_eta: 0`. For single-channel T2M, a scalar diagonal
 covariance is exactly ordinary DDNM because the variance scale cancels; the
 meaningful comparison is ordinary versus spatial/spectral covariance. The
-current covariance assumes periodic stationary 128x128 patches. Use
-`--directional` during estimation to preserve anisotropy rather than radially
-averaging the spectrum.
+current covariance assumes periodic stationary 128x128 patches (a
+Gaspari-Cohn localization taper keeps the periodic embedding from wrapping
+corrections across the patch edge). Use `--directional` during estimation to
+preserve anisotropy rather than radially averaging the spectrum.
+
+**Measured outcome (t2m, 256 patches, 4x):** Weather-DDNM is a null — 0.4025
+vs ordinary DDNM's 0.4044 L2 (inside the ±0.002–0.005 noise floor), identical
+spectra — despite the mechanism being real in isolation (the covariance
+correction injects <1 % of nearest-upsampling's spurious block-scale power;
+kept as a regression test). The denoiser erases per-step correction artifacts
+before they reach the output. Two by-products outrank the method itself:
+UNPROJECTED guided diffusion scores 0.7869 — worse than bicubic (0.4559) with
+a 0.62 K coarse-consistency error — so the projection is worth ~2x in L2,
+larger than any conditioning or architecture effect measured here; and the
+covariance-lift initialization is catastrophic (spectrum 0.29 vs 0.01, 28x
+worse): guided diffusion needs its guidance to carry high-frequency ENERGY,
+and statistical optimality of the initialization is the wrong objective.
+
+## Null-space Langevin corrector (posterior calibration)
+
+`sample/langevin_corrector.py` runs unadjusted Langevin steps restricted to
+`ker A` over the frozen unconditional prior, AFTER a finished reconstruction:
+the score comes from the trained eps-net at a small fixed timestep (re-noise,
+rescale), drift and injected noise are both projected by `P = I - A†A`, so
+coarse consistency is preserved exactly at every step for any network. The
+invariant target (up to discretization and score error) is the model posterior
+restricted to `{x: coarsen(x) = y}`; the preconditioner is `C = I` or the
+spectral `C = P F⁻¹ S F P` reusing the Weather-DDNM covariance artifact.
+Motivation, guarantees, and caveats: `docs/spectral_posterior_corrector.md`.
+
+The gate experiment (calibration vs corrector steps, isotropic vs spectral on
+identical base members — each corrector step costs one network eval):
+
+```bash
+python -m eval.corrector_calibration --config config/t2m.yaml \
+    --ckpt diffusion.pt --project --wandb
+```
+
+Targets the measured ~20 % ensemble underdispersion at `ddim_eta: 0`; step 0
+is the uncorrected baseline, and the reliable-spread target
+(ens-mean L2 / sqrt(1 + 1/M)) is plotted alongside the spread curve.
 
 ### Geographic conditioning: learned embeddings vs baselines
 
@@ -230,7 +268,13 @@ the run-to-run noise floor for reading the tables above.
 Pending before these become thesis-final: the `static` ensemble (the
 probabilistic tie-breaker), seed replicates (the combo-vs-static single-draw
 margin sits near the sampling-noise floor), the `--shuffle-geo` control on
-the combo arm, an `--eta` calibration sweep, and the `--gated` ablation.
+the combo arm, and an `--eta` calibration sweep. The `--gated` ablation ran:
+at `gating_c_max: 0.6` the gated arm loses spectrum to `static` — i.e. it
+gives up the hash family's signature strength, because the fine embedding
+levels do legitimate work early in the guided chain (the 8x chain starts at
+u = 0.68 where the finest gate is only ~69 % open). That configuration is
+rejected; a `c_max: 0.4` retune is licensed only if the memgap diagnostic
+shows substantial memorization for the ungated tables.
 
 ## Full-field reconstruction
 
@@ -334,6 +378,17 @@ config to customize. To log without an account, run `wandb offline` first.
 
 Headline table: rows `{4× in-dist, 8× out-of-dist}` × columns
 `{Diffusion, Direct-map, Bicubic}`. The story is the OOD row.
+
+**Diagnostic battery** (`eval/diagnose.py`, same ladder interface as
+`compare_geo`): `errmap` — per-pixel |error| accumulated into full-grid maps
+with land-sea overlay plus a difference map (is the residual terrain-locked or
+synoptic?); `memgap` — train-vs-test denoising loss binned by noise level (the
+memorization probe behind `--gated`); `coherence` — per-wavenumber spectral
+coherence with the reference (`eval/metrics.radial_coherence`), separating
+reconstructed fine scales from hallucinated-with-the-right-power; `qq` — value
+calibration and tail compression that L2/spectrum are blind to. Ensemble
+metrics (ensemble-mean L2, CRPS, spread vs the reliable-spread target) live in
+`compare_geo --ensemble` and `eval/corrector_calibration.py`.
 
 ## Scale, applied motivation, and scope
 
