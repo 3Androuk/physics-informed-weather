@@ -40,6 +40,15 @@ into a comparison suite of generative downscaling methods:
 - **Full-field reconstruction** — patch-trained models applied to whole
   lat-band fields: direct inference, overlap-blend tiling with shared noise and
   exact data-consistency projection, and MultiDiffusion-style per-step fusion
+- **Inference-time projection & posterior correction** — exact DDNM data
+  consistency (measured worth ~2x in L2: unprojected guided diffusion loses to
+  bicubic), a covariance-aware Weather-DDNM variant (measured null — recorded
+  with its mechanism), structurally consistent null-space residual transport
+  (`--null-space`), and a null-space Langevin corrector targeting ensemble
+  calibration (`eval/corrector_calibration.py`)
+- **Diagnostics** — error climatology maps, a train-vs-test memorization probe
+  by noise level, spectral coherence, and tail-calibration Q-Q plots
+  (`eval/diagnose.py`)
 
 → See [`era5-diffusion-downscaling/README.md`](era5-diffusion-downscaling/README.md)
 for methods, commands, and references.
@@ -49,8 +58,9 @@ for methods, commands, and references.
 | branch | contents |
 |---|---|
 | `main` | original Phase-1 state (guided DDPM + baselines, single variable) |
-| `codex/flow-stochastic-superres` | **active development**: everything listed above, single-variable configs (t2m, z500). Supersedes `worktree-geo-hash-encoding` (its full history is contained here). |
-| `claude/wb2-20var-downscaling` | everything above **plus multivariable downscaling**: 20 WB2 variables as 20 input/output channels (`config/wb2_20var.yaml`), per-channel normalization, display-channel evaluation |
+| `codex/flow-stochastic-superres` | **active development**: everything listed above, single-variable configs (t2m, z500), plus the t2m-scoped experiments (Weather-DDNM, null-space transport, Langevin corrector). Supersedes `worktree-geo-hash-encoding` (its full history is contained here). |
+| `claude/wb2-20var-downscaling` | everything above **plus multivariable downscaling**: 20 WB2 variables as 20 input/output channels (`config/wb2_20var.yaml`, width-128 UNet), per-channel normalization, display-channel evaluation, and optional multi-node DDP training (`scripts/train_multinode.sh`) |
+| `claude/healpix-backbone-pilot` | gated exploration of a HEALPix-native backbone; carries the round-trip remap floor check (`data/healpix_roundtrip_check.py`) that decides whether the pilot trains at all |
 
 ## Layout
 
