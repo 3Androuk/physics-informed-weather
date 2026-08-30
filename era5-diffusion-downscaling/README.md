@@ -335,6 +335,64 @@ config to customize. To log without an account, run `wandb offline` first.
 Headline table: rows `{4× in-dist, 8× out-of-dist}` × columns
 `{Diffusion, Direct-map, Bicubic}`. The story is the OOD row.
 
+## Scale, applied motivation, and scope
+
+**Physical scale.** The target grid is 0.25° ≈ 28 km (zonal spacing 14–28 km
+across the ±60° band): mesoscale downscaling, an order of magnitude coarser
+than km-scale systems like CorrDiff (25 km → 2 km). Inputs per ratio:
+2× ≈ 56 km, 4× ≈ 111 km, 8× ≈ 223 km, held-out 16× ≈ 445 km. A 128-px patch
+spans ~3,600 km. (Cross-check: the hash grid's finest level ≈ 100 km cells and
+the matched HEALPix Nside 64 ≈ 102 km — the ladder matching is within 2 % in
+physical units.)
+
+**Applied motivation: CMIP6 → CORDEX.** Impact assessment needs ~25 km fields;
+the CMIP6 archive behind IPCC AR6 provides ~50–250 km, and the conventional
+bridge (dynamical downscaling) costs CPU-months per scenario. The ratio ladder
+brackets the archive: 4× ≈ a typical 1° CMIP6 model, 8× ≈ its coarse end,
+16× the stress test beyond it. Because CMIP6 models do NOT share a resolution,
+a multi-model ensemble needs a ratio-agnostic downscaler — which turns the
+method comparison into a deployment rule: fixed known ratio → conditional
+models; heterogeneous or unknown ratio → the guided unconditional model (the
+only family that survives held-out 16×).
+
+**Perfect prognosis, by necessity.** Training pairs GCM→truth do not exist:
+free-running climate models are not time-synchronized with reality (their
+15 March 2007 is a draw from a similar climate, not the same day). MOS-style
+joint training (as in CorrDiff) requires a fine model DRIVEN by the coarse one
+— the expensive runs this line of work exists to avoid. So training is
+coarsened-truth → truth, and deployment composes with a separate
+bias-correction stage (e.g. quantile mapping) that makes GCM output a
+plausible coarsening before downscaling.
+
+**The input is treated as truth — deliberately.** With projection on,
+coarsen(output) == input exactly; measured worth ~2× in L2 here, where the
+input genuinely is a coarsening. For biased real-GCM input the same property
+preserves the bias, hence the two-stage pipeline above. `--project` is
+effectively a dial between "the input is truth" and "the input is a
+suggestion" (both ends measured: 0.404 vs 0.787 L2); soft consistency —
+projecting onto a ball around the observation sized by input uncertainty — is
+the principled middle ground, left to future work.
+
+**How underdetermined is the task?** The observation fixes only block means:
+1 − 1/r² of the degrees of freedom are free (94 % at 4×, 98 % at 8×, 99.6 % at
+16× — the ker-A dimension). This is why the framing is generative (sample a
+posterior) rather than regressive (invent a unique answer), and why ensemble
+metrics (CRPS, spread–skill) are first-class. The encoder ladder measures the
+stationary-geography share of the recoverable signal (~13 % of L2); the rest
+is weather.
+
+**What transfers to km-scale, what doesn't.** Transfer directly: the
+data-consistency result, the η-underdispersion finding, the scale-matching
+principle, the conditional model families, geo conditioning, and the tiling
+machinery. Contingent: everything built on an exact linear degradation
+(guided unconditional sampling, DDNM projection, null-space transport) —
+real km-scale pairs two different models with no exact A. Likely to change:
+the geo plateau — at 2 km, terrain drives nonlinear local circulations, so
+the learned-vs-static gap is predicted to widen. Also noted: ERA5's effective
+resolution is coarser than its grid (spectral truncation), so the finest
+generated scales sit near what the reanalysis itself resolves — an argument
+for scoring coherence, not just spectral power.
+
 ## Deferred work
 - **Physics-informed conditioning** via an *approximate* equation
   (quasi-geostrophic / barotropic vorticity on 500 hPa) — a future ablation.
