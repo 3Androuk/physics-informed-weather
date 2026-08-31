@@ -94,6 +94,7 @@ class GaussianDiffusion(nn.Module):
         covariance_projector=None,
         covariance_init: bool = False,
         covariance_init_projector=None,
+        dps_scale: float = 0.0,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -118,6 +119,17 @@ class GaussianDiffusion(nn.Module):
         ablated with ordinary per-step DDNM. All are inference-only and make no
         extra denoiser calls.
 
+        With dps_scale > 0 (requires `lf` and `ratio`), each step additionally
+        applies diffusion posterior sampling guidance (Chung et al., ICLR
+        2023): the Tweedie estimate's coarse residual y - A(x0_hat(x_t)) is
+        backpropagated THROUGH the denoiser, and x_{t-1} takes a step of size
+        dps_scale down the gradient of ||y - A x0_hat||. Unlike hard
+        projection (which overwrites block means and moves nothing else), the
+        Jacobian couples the range-space residual into null-space directions —
+        soft, likelihood-weighted consistency. Composes with project=True (the
+        gradient is computed on the unprojected estimate; exact consistency is
+        restored after the final kick). Costs one backward pass per step.
+
         Args:
             model: trained noise predictor eps_theta(x_t, t).
             x_guidance: (N, 1, H, W) low-fidelity guidance x^(g), already
@@ -138,9 +150,9 @@ class GaussianDiffusion(nn.Module):
             assert init_noise.shape == (K, *x_guidance.shape), (
                 f"init_noise must be (K, *x.shape) = {(K, *x_guidance.shape)}, "
                 f"got {tuple(init_noise.shape)}")
-        if project or covariance_init:
+        if project or covariance_init or dps_scale > 0:
             assert lf is not None and ratio is not None, (
-                "projection/covariance initialization needs lf and ratio")
+                "projection/covariance init/DPS guidance needs lf and ratio")
             from data.degrade import coarsen, upsample_nearest
             hw = x_guidance.shape[-2:]
         init_projector = covariance_init_projector or covariance_projector
@@ -178,9 +190,24 @@ class GaussianDiffusion(nn.Module):
                 a_prev = self.alphas_cumprod[tprev]
 
                 t_batch = torch.full((x.shape[0],), ti, device=device, dtype=torch.float32)
-                eps_theta = model(x, t_batch) if cond is None else model(x, t_batch, cond)
-
-                x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
+                dps_grad = None
+                if dps_scale > 0:
+                    # DPS: differentiate ||y - A x0_hat(x_t)|| through the
+                    # denoiser. The per-sample norm (not its square) gives the
+                    # self-normalized step of Chung et al., Algorithm 1.
+                    with torch.enable_grad():
+                        x_in = x.detach().requires_grad_(True)
+                        eps_theta = (model(x_in, t_batch) if cond is None
+                                     else model(x_in, t_batch, cond))
+                        x0_pred = (x_in - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
+                        resid = (lf - coarsen(x0_pred, ratio)).flatten(1)
+                        dps_grad = torch.autograd.grad(
+                            resid.norm(dim=1).sum(), x_in)[0]
+                    eps_theta = eps_theta.detach()
+                    x0_pred = x0_pred.detach()
+                else:
+                    eps_theta = model(x, t_batch) if cond is None else model(x, t_batch, cond)
+                    x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
                 if project:
                     if covariance_projector is None:
                         x0_pred = x0_pred + upsample_nearest(
@@ -195,6 +222,14 @@ class GaussianDiffusion(nn.Module):
                 x = a_prev.sqrt() * x0_pred + dir_xt
                 if eta > 0:
                     x = x + sigma * torch.randn_like(x)
+                if dps_grad is not None:
+                    x = x - dps_scale * dps_grad
+                    if project and tprev == 0:
+                        # the final kick may leave the fibre; restore exactness
+                        if covariance_projector is None:
+                            x = x + upsample_nearest(lf - coarsen(x, ratio), hw)
+                        else:
+                            x = covariance_projector.project(x, lf, ratio)
 
             x_g = x  # recursive refinement: this reconstruction guides the next loop
         return x_g

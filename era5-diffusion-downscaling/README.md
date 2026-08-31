@@ -137,6 +137,23 @@ covariance-lift initialization is catastrophic (spectrum 0.29 vs 0.01, 28x
 worse): guided diffusion needs its guidance to carry high-frequency ENERGY,
 and statistical optimality of the initialization is the wrong objective.
 
+## DPS likelihood guidance (soft data consistency)
+
+`--dps <scale>` on `eval/compare_geo.py` (and `dps_scale` on
+`reconstruct_diffusion` / `guided_reconstruct`) adds diffusion posterior
+sampling guidance (Chung et al., ICLR 2023) to the guided sampler: each DDIM
+step backpropagates the Tweedie estimate's coarse residual `y − A x̂₀(x_t)`
+THROUGH the denoiser and descends its norm with the self-normalized DPS step.
+Where hard projection overwrites block means and moves nothing else, the
+denoiser Jacobian couples the range-space residual into null-space directions
+— soft, likelihood-weighted consistency. Zero-shot (frozen checkpoint, A only
+at inference), composable with `--project` (the gradient is taken on the
+unprojected estimate; exactness is restored after the final kick), one extra
+backward pass per step (~2× time; halve `--batch` if VRAM is tight). This is
+the literature-standard alternative to projection reviewers will expect in the
+method comparison: projection-only vs DPS-only vs both is a three-run sweep
+(`--project`, `--dps 0.5`, `--project --dps 0.5`).
+
 ## Null-space Langevin corrector (posterior calibration)
 
 `sample/langevin_corrector.py` runs unadjusted Langevin steps restricted to
@@ -499,6 +516,13 @@ for scoring coherence, not just spectral power.
   Method for Denoising Diffusion Probabilistic Models.* ICCV.
   https://arxiv.org/abs/2108.02938 — the ancestor: per-step low-frequency
   replacement on the noisy iterate.
+
+**DPS likelihood guidance (`--dps`):**
+- Chung, H., Kim, J., Mccann, M.T., Klasky, M.L., Ye, J.C. (2023). *Diffusion
+  Posterior Sampling for General Noisy Inverse Problems* (DPS). ICLR.
+  https://arxiv.org/abs/2209.14687 — the Tweedie-based likelihood gradient
+  through the denoiser with the self-normalized step; here A is the block
+  average and the term composes with (or replaces) hard DDNM projection.
 
 **Covariance-aware projection (Weather-DDNM):**
 - Song, J., Vahdat, A., Mardani, M., Kautz, J. (2023). *Pseudoinverse-Guided

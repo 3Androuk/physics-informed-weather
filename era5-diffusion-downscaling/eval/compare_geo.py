@@ -40,7 +40,7 @@ from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # n
 
 
 def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
-           project=False):
+           project=False, dps_scale=0.0):
     it = range(0, len(hf), batch)
     try:
         from tqdm import tqdm
@@ -51,7 +51,8 @@ def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
     for i in it:
         c = None if coords is None else coords[i:i + batch]
         outs.append(reconstruct_diffusion(diffusion, model, hf[i:i + batch], ratio, rc,
-                                          eta=eta, coords=c, project=project).cpu())
+                                          eta=eta, coords=c, project=project,
+                                          dps_scale=dps_scale).cpu())
     return torch.cat(outs, dim=0)
 
 
@@ -101,6 +102,13 @@ def main():
                          "this eval only. >0 diversifies ensemble members "
                          "beyond the noise-mixing initialization — the fix for "
                          "underdispersive ensembles; no retraining involved.")
+    ap.add_argument("--dps", type=float, default=0.0,
+                    help="DPS likelihood-guidance step size (Chung et al. "
+                         "2023): each DDIM step also descends the gradient of "
+                         "||y - A x0_hat|| THROUGH the denoiser. Soft "
+                         "data consistency — an alternative or complement to "
+                         "--project. Costs one backward pass per step "
+                         "(halve --batch if VRAM is tight). Try 0.3-1.0.")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.wandb:
@@ -135,6 +143,7 @@ def main():
         print(f"  {disp}: {path} (geo={geo_on}, encoder={encoder})")
     print(f"Comparing {len(models)} checkpoint(s) on {n} patches"
           f"{' | projection ON' if args.project else ''}"
+          f"{f' | DPS scale {args.dps:g}' if args.dps > 0 else ''}"
           f"{' | SHUFFLED geo payloads' if args.shuffle_geo else ''}")
 
     if args.shuffle_geo:
@@ -151,6 +160,8 @@ def main():
             f"{'_shufgeo' if args.shuffle_geo else ''}")
     if args.eta is not None:
         stem += f"_eta{args.eta:g}"
+    if args.dps > 0:
+        stem += f"_dps{args.dps:g}"
 
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
     hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
@@ -160,7 +171,8 @@ def main():
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]; tag = f"{ratio}x"
         preds = {disp: _recon(dif, mod, hf, ratio, rc, eta, coords, args.batch,
-                              label=f"{tag} {disp}", project=args.project)
+                              label=f"{tag} {disp}", project=args.project,
+                              dps_scale=args.dps)
                  for disp, mod, dif, coords, _ in models}
         preds["Bicubic"] = torch.cat(
             [reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
@@ -190,7 +202,7 @@ def main():
                 members = [normalizer.decode(
                     _recon(dif, mod, hf_e, ratio, rc, eta, c, args.batch,
                            label=f"{tag} {disp} member {m + 1}/{args.ensemble}",
-                           project=args.project))
+                           project=args.project, dps_scale=args.dps))
                     for m in range(args.ensemble)]
                 stack = torch.stack(members)
                 row = {
@@ -215,11 +227,13 @@ def main():
                                extra_config={"n_test_patches": n,
                                              "ckpts": ckpt_names,
                                              "projection": args.project,
+                                             "dps_scale": args.dps,
                                              "shuffle_geo": args.shuffle_geo,
                                              "ensemble": args.ensemble},
                                name=run_name(cfg, "ladder" if len(models) > 2 else "ablation",
                                              *(d for d, *_ in models),
                                              "proj" if args.project else "",
+                                             f"dps{args.dps:g}" if args.dps > 0 else "",
                                              "shufgeo" if args.shuffle_geo else "",
                                              f"ens{args.ensemble}" if args.ensemble > 1 else "",
                                              f"eta{args.eta:g}" if args.eta is not None else ""))
