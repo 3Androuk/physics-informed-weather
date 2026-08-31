@@ -74,6 +74,10 @@ def main():
                          "(and in direct mode): anchors all tiles' low frequencies "
                          "to the shared observation throughout sampling, "
                          "suppressing tile-scale seams at weak ratios (e.g. 8x)")
+    ap.add_argument("--ensemble", type=int, default=1,
+                    help="reconstruct each stochastic method N times per field "
+                         "and also score the ensemble mean. N=1 reproduces the "
+                         "original single-sample path exactly.")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed for the shared global noise fields")
     ap.add_argument("--wandb", action="store_true",
@@ -167,15 +171,38 @@ def main():
             _score(sums, panels, "Bicubic", "-", bic.cpu(), hf_phys, normalizer, 0.0, fi)
 
             for name, (kind, payload, geo) in methods.items():
-                gen = torch.Generator().manual_seed(args.seed + fi)
+                # Direct map is deterministic: N members would be N copies.
+                n_ens = 1 if kind == "directmap" else max(1, int(args.ensemble))
+                if n_ens == 1:
+                    # Original path, byte-for-byte (one generator across modes).
+                    gen = torch.Generator().manual_seed(args.seed + fi)
+                    for mode in args.modes:
+                        t0 = time.time()
+                        rec = _reconstruct(kind, payload, mode, hf, lf, lf_plain,
+                                           coarse, ratio, rc, eta, tile, args, geo, gen)
+                        if rec is None:
+                            continue
+                        _score(sums, panels, name, mode, rec.cpu(), hf_phys,
+                               normalizer, time.time() - t0, fi)
+                    continue
                 for mode in args.modes:
                     t0 = time.time()
-                    rec = _reconstruct(kind, payload, mode, hf, lf, lf_plain, coarse,
-                                       ratio, rc, eta, tile, args, geo, gen)
-                    if rec is None:
+                    members = []
+                    for e in range(n_ens):
+                        gen = torch.Generator().manual_seed(args.seed + 10007 * e + fi)
+                        rec = _reconstruct(kind, payload, mode, hf, lf, lf_plain,
+                                           coarse, ratio, rc, eta, tile, args, geo, gen)
+                        if rec is None:
+                            break
+                        members.append(rec)
+                    if not members:
                         continue
-                    _score(sums, panels, name, mode, rec.cpu(), hf_phys, normalizer,
-                           time.time() - t0, fi)
+                    sec = time.time() - t0
+                    _score(sums, panels, name, mode, members[0].cpu(), hf_phys,
+                           normalizer, sec / n_ens, fi)
+                    _score(sums, panels, name, f"{mode} ens{n_ens}",
+                           torch.stack(members).mean(0).cpu(), hf_phys, normalizer,
+                           sec, fi)
 
         row = {}
         for (name, mode), (l2s, specs, secs) in sums.items():

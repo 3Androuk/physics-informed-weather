@@ -68,8 +68,19 @@ def main():
                          "chain runs to max(steps).")
     ap.add_argument("--modes", nargs="+", default=["isotropic", "spectral"],
                     choices=["isotropic", "spectral"])
-    ap.add_argument("--t-eps", type=int, default=50,
-                    help="DDPM timestep of the corrector's score estimate.")
+    ap.add_argument("--t-eps", type=int, nargs="+", default=[50],
+                    help="DDPM timestep(s) of the corrector's score estimate; "
+                         "several values share one base-ensemble computation.")
+    ap.add_argument("--eta", type=float, default=None,
+                    help="override sample.ddim_eta for the BASE ensembles "
+                         "(eta>0 = stochastic DDIM: the upstream dispersion "
+                         "fix the corrector competes against).")
+    ap.add_argument("--anneal", action="store_true",
+                    help="geometric t ladder from t_eps down to 1 across the "
+                         "chain (annealed Langevin -> targets p_0). "
+                         "Intermediate checkpoints are mid-anneal states.")
+    ap.add_argument("--tag", default="",
+                    help="suffix for output filenames (avoid clobbering).")
     ap.add_argument("--snr", type=float, default=0.16,
                     help="Song-style adaptive step-size signal-to-noise.")
     ap.add_argument("--delta", type=float, default=None,
@@ -88,7 +99,8 @@ def main():
     if args.wandb:
         cfg.setdefault("wandb", {})["enabled"] = True
     device = get_device()
-    eta = cfg["sample"]["ddim_eta"]
+    eta = cfg["sample"]["ddim_eta"] if args.eta is None else float(args.eta)
+    print(f"base-ensemble eta = {eta}" + (" (override)" if args.eta is not None else ""))
     patch_dir = Path(cfg["paths"]["patch_dir"])
     results_dir = ensure_dir(Path(cfg["paths"]["results_dir"]) / "corrector")
     normalizer = load_norm_stats(patch_dir)
@@ -117,7 +129,17 @@ def main():
         power = load_spectral_power(cov_path, device)
 
     checkpoints = sorted(set(int(s) for s in args.steps))
+    total_steps = max(checkpoints)
+    t_sched = None
+    if args.anneal:
+        if len(args.t_eps) != 1:
+            raise SystemExit("--anneal takes a single --t-eps start value")
+        t0 = int(args.t_eps[0])
+        f = np.linspace(0.0, 1.0, max(total_steps, 1))
+        t_sched = [max(1, int(round(t0 ** (1.0 - x)))) for x in f]
+        print(f"annealed t schedule ({total_steps} steps): {t_sched}")
     report = {"ckpt": args.ckpt, "modes": args.modes, "t_eps": args.t_eps,
+              "eta": eta, "anneal": bool(args.anneal),
               "snr": args.snr, "delta": args.delta, "ensemble": args.ensemble,
               "patches": n, "project": args.project, "results": {}}
 
@@ -140,11 +162,15 @@ def main():
 
         rows = {}
         for mode in args.modes:
+          for teps in args.t_eps:
+            key = mode if len(args.t_eps) == 1 else f"{mode}@t{teps}"
             mode_power = power if mode == "spectral" else None
             states = [b.clone().to(device) for b in base]
             curve = {}
             done = 0
             for ck_step in checkpoints:
+                seg_sched = (None if t_sched is None
+                             else t_sched[done:ck_step])
                 for m in range(args.ensemble):
                     outs = []
                     for i in range(0, n, args.batch):
@@ -152,9 +178,9 @@ def main():
                         outs.append(langevin_correct(
                             model, diffusion, states[m][i:i + args.batch].to(device),
                             coarse[i:i + args.batch], ratio,
-                            steps=ck_step - done, t_eps=args.t_eps,
+                            steps=ck_step - done, t_eps=teps,
                             snr=args.snr, delta=args.delta, cond=c,
-                            power=mode_power).cpu())
+                            power=mode_power, t_schedule=seg_sched).cpu())
                     states[m] = torch.cat(outs)
                 done = ck_step
                 members_phys = [normalizer.decode(s) for s in states]
@@ -164,25 +190,25 @@ def main():
                            for s in states)
                 curve[ck_step]["max_coarse_violation"] = viol
                 r = curve[ck_step]
-                print(f"  {tag} {mode:9s} step {ck_step:3d} | "
+                print(f"  {tag} {key:14s} step {ck_step:3d} | "
                       f"single L2 {r['single_l2']:.4f} | "
                       f"ens L2 {r['ens_mean_l2']:.4f} | "
                       f"CRPS {r['crps']:.4f} | spread {r['spread']:.4f} "
                       f"(reliable {r['reliable_spread']:.4f}) | "
                       f"coarse {viol:.1e}")
-            rows[mode] = curve
+            rows[key] = curve
         report["results"][tag] = rows
 
         # ── Figure: spread & CRPS versus corrector steps ───────────────────
         fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-        for mode in args.modes:
-            steps = sorted(rows[mode])
-            axes[0].plot(steps, [rows[mode][s]["spread"] for s in steps],
-                         marker="o", label=f"{mode} spread")
-            axes[0].plot(steps, [rows[mode][s]["reliable_spread"] for s in steps],
-                         ls="--", alpha=0.6, label=f"{mode} reliable target")
-            axes[1].plot(steps, [rows[mode][s]["crps"] for s in steps],
-                         marker="o", label=mode)
+        for key, curve in rows.items():
+            steps = sorted(curve)
+            axes[0].plot(steps, [curve[s]["spread"] for s in steps],
+                         marker="o", label=f"{key} spread")
+            axes[0].plot(steps, [curve[s]["reliable_spread"] for s in steps],
+                         ls="--", alpha=0.6, label=f"{key} reliable target")
+            axes[1].plot(steps, [curve[s]["crps"] for s in steps],
+                         marker="o", label=key)
         axes[0].set(xlabel="corrector steps", ylabel="ensemble spread (K)",
                     title=f"{tag} spread vs reliable target")
         axes[1].set(xlabel="corrector steps", ylabel="CRPS (K)",
@@ -190,12 +216,14 @@ def main():
         for ax in axes:
             ax.legend(fontsize=8)
         fig.tight_layout()
-        fig_path = results_dir / f"calibration_{tag}.png"
+        suffix = f"_{args.tag}" if args.tag else ""
+        fig_path = results_dir / f"calibration_{tag}{suffix}.png"
         fig.savefig(fig_path, dpi=130, bbox_inches="tight")
         plt.close(fig)
         print(f"saved -> {fig_path}")
 
-    out = results_dir / "corrector_calibration.json"
+    suffix = f"_{args.tag}" if args.tag else ""
+    out = results_dir / f"corrector_calibration{suffix}.json"
     with open(out, "w") as f:
         json.dump(report, f, indent=2)
     print(f"saved -> {out}")
@@ -206,14 +234,17 @@ def main():
                       ("ckpt", "modes", "t_eps", "snr", "ensemble", "patches",
                        "project")},
         name=run_name(cfg, "corrector", Path(args.ckpt).stem,
-                      *args.modes, f"t{args.t_eps}"))
+                      *args.modes,
+                      "t" + "-".join(str(t) for t in args.t_eps)
+                      + ("_anneal" if args.anneal else "")
+                      + (f"_eta{eta:g}" if eta else "")))
     if wb_run is not None:
         for tag, rows in report["results"].items():
             for mode, curve in rows.items():
                 for s, r in curve.items():
                     for k, v in r.items():
                         wb_run.summary[f"{tag}/{mode}/step{s}/{k}"] = v
-            fig_path = results_dir / f"calibration_{tag}.png"
+            fig_path = results_dir / f"calibration_{tag}{suffix}.png"
             if fig_path.exists():
                 wb_run.log({f"corrector/{tag}": wandb.Image(str(fig_path))})
         wb_run.finish()

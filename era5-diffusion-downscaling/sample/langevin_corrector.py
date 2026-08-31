@@ -55,7 +55,8 @@ def _spectral_apply(x: torch.Tensor, power: torch.Tensor, exponent: float):
 def langevin_correct(model, diffusion, x, coarse, ratio, steps,
                      t_eps: int = 50, snr: float = 0.16, delta: float | None = None,
                      cond=None, power: torch.Tensor | None = None,
-                     generator: torch.Generator | None = None):
+                     generator: torch.Generator | None = None,
+                     t_schedule=None):
     """Run `steps` ker-A Langevin steps on a (consistent) reconstruction.
 
     Args:
@@ -78,9 +79,15 @@ def langevin_correct(model, diffusion, x, coarse, ratio, steps,
     x = project_data_consistency(x, coarse, ratio)
     if steps == 0:
         return x
-    sa = diffusion.sqrt_abar[t_eps]
-    som = diffusion.sqrt_one_minus_abar[t_eps]
-    t_batch = torch.full((x.shape[0],), float(t_eps), device=x.device)
+    # Fixed-t Langevin targets p_t, NOT p_0 -- a systematically smoothed
+    # distribution. t_schedule (one t per step, decreasing) anneals the
+    # stationary target down toward p_0 instead.
+    if t_schedule is not None:
+        ts = [int(t) for t in t_schedule]
+        if len(ts) != int(steps):
+            raise ValueError(f"t_schedule has {len(ts)} entries for {steps} steps")
+    else:
+        ts = [int(t_eps)] * int(steps)
 
     def randn():
         if generator is None:
@@ -89,7 +96,10 @@ def langevin_correct(model, diffusion, x, coarse, ratio, steps,
                            device=generator.device if hasattr(generator, "device")
                            else "cpu", dtype=x.dtype).to(x.device)
 
-    for _ in range(int(steps)):
+    for t_k in ts:
+        sa = diffusion.sqrt_abar[t_k]
+        som = diffusion.sqrt_one_minus_abar[t_k]
+        t_batch = torch.full((x.shape[0],), float(t_k), device=x.device)
         x_in = sa * x + som * randn()
         eps_hat = model(x_in, t_batch) if cond is None else model(x_in, t_batch, cond)
         score = -(sa / som) * eps_hat

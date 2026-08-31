@@ -101,7 +101,11 @@ class SpectralHelperTests(unittest.TestCase):
         # S^{1/2} twice == S once
         twice = _spectral_apply(_spectral_apply(x, power, 0.5), power, 0.5)
         once = _spectral_apply(x, power, 1.0)
-        self.assertTrue(torch.allclose(twice, once, atol=1e-4))
+        # Scale-relative: the unnormalised rFFT puts |once| at ~1e3 here, so a
+        # fixed atol=1e-4 is below float32 eps for these magnitudes (measured
+        # relative error 2e-7, and 4e-13 in float64 -- the operator is exact).
+        rel = (twice - once).abs().max() / once.abs().max()
+        self.assertLess(float(rel), 1e-5)
 
     def test_load_spectral_power_shape(self):
         import tempfile

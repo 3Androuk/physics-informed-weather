@@ -1,0 +1,142 @@
+seed: 42
+paths:
+  raw_dir: datasets/raw_t2m
+  patch_dir: datasets/patches_t2m
+  ckpt_dir: checkpoints_t2m
+  results_dir: results_t2m/ff_split_geo_r2
+  log_dir: results_t2m/tb
+data:
+  era5_zarr: gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr
+  gcs_token: anon
+  variable: 2m_temperature
+  level: null
+  train_years:
+  - 2007
+  - 2015
+  test_years:
+  - 2016
+  - 2017
+  time_stride: 4
+patches:
+  size: 128
+  per_field: 8
+  lat_range:
+  - -60.0
+  - 60.0
+normalize:
+  method: zscore
+diffusion:
+  timesteps: 1000
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+transport:
+  train_ratios:
+  - 2
+  - 4
+  - 8
+  eval_ratios:
+  - 4
+  - 8
+  - 16
+  time_scale: 1000.0
+  time_epsilon: 0.0001
+  sample_steps: 100
+  solver: heun
+  projection: final
+  stochastic_interpolant:
+    gamma: 0.5
+    score_weight: 1.0
+    sampler: ode
+    stochasticity: 0.1
+unet:
+  in_channels: 1
+  out_channels: 1
+  base_channels: 64
+  channel_mults:
+  - 1
+  - 2
+  - 4
+  - 8
+  num_res_blocks: 2
+  time_emb_dim: 256
+  attn_resolutions:
+  - 16
+  dropout: 0.1
+  groupnorm_groups: 32
+geo:
+  enabled: false
+  encoder: hash
+  sinusoidal_n_frequencies: 3
+  static_fields:
+  - geopotential_at_surface
+  - land_sea_mask
+  - slope_of_sub_gridscale_orography
+  healpix_n_levels: 8
+  healpix_nside_max: 128
+  input_dim: 3
+  n_levels: 8
+  n_features_per_level: 2
+  log2_hashmap_size: 19
+  base_resolution: 16
+  finest_resolution: 128
+  altitude: null
+  level_gating: false
+  gating_c_max: 0.6
+  gating_width: 0.1
+residual:
+  train_ratios:
+  - 2
+  - 4
+  - 8
+  n_steps: 100
+train:
+  batch_size: 16
+  epochs: 200
+  lr: 0.0002
+  weight_decay: 0.0
+  grad_clip: 1.0
+  amp: false
+  ema_decay: 0.999
+  num_workers: 4
+  log_every: 50
+  val_patches: 256
+  ckpt_every_epochs: 1
+  sample_every_epochs: 10
+directmap:
+  train_ratio: 4
+  batch_size: 16
+  epochs: 200
+  lr: 0.0002
+  grad_clip: 1.0
+  amp: false
+sample:
+  ddim_eta: 0.0
+  guidance_strength: 0.0
+  interp: nearest
+  reconstructions:
+  - ratio: 2
+    K: 3
+    t_steps:
+    - 80
+    - 57
+    - 40
+    smooth_sigma: 0.0
+weather_ddnm:
+  covariance_file: spectral_covariance.npz
+  max_patches: 8192
+  spectrum: isotropic
+  shrinkage: 0.02
+  relative_floor: 0.0001
+  inverse_floor: 1.0e-07
+  estimation_window: hann
+  localization_radius: 32
+eval:
+  n_test_patches: 256
+  spectrum_bins: null
+  hist_bins: 100
+wandb:
+  enabled: false
+  project: era5-diffusion-downscaling
+  entity: null
+  name: null
