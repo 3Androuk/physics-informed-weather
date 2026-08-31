@@ -89,7 +89,7 @@ def display_channel(cfg: dict) -> int:
 _ENCODER_TAG = {"hash": "", "healpix": "_hpx", "xyz": "_xyz",
                 "sinusoidal": "_sin", "static": "_static",
                 "hash_static": "_combo",
-                "xyz_static": "_xyzstatic",
+                "hash_compact": "_hashcompact", "xyz_static": "_xyzstatic",
                 "sinusoidal_static": "_sinstatic"}
 
 

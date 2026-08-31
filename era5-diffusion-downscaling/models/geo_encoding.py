@@ -20,6 +20,8 @@ unlike using a hash grid to represent a (time-varying) field, there is no
 per-sample fitting.
 """
 
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -152,6 +154,89 @@ class MultiResHashGrid(nn.Module):
             outs.append(feat)
         out = torch.cat(outs, dim=-1)                    # (P, L*F)
         return out.reshape(*lead, self.output_dim)
+
+
+class CompactMultiResHashGrid(MultiResHashGrid):
+    """MultiResHashGrid storing only the lattice vertices the data can touch.
+
+    `support` is (P, d) float in [0,1]: every coordinate the dataset will ever
+    query (the full band grid). Per level, the union of the 2^d trilinear
+    corner vertices over the support is enumerated; levels where that count is
+    smaller than the existing table are re-allocated to exactly that count,
+    with a sorted linear-id buffer for lookup (binary search, no collisions).
+    Buffers and resized tables persist in checkpoints; reconstruction at eval
+    passes the same support, so shapes match at load_state_dict time.
+    """
+
+    def __init__(self, support, **kwargs):
+        super().__init__(**kwargs)
+        assert support is not None and support.shape[-1] == self.d
+        sup = torch.as_tensor(support, dtype=torch.float32).reshape(-1, self.d)
+        sup = sup.clamp(0.0, 1.0)
+        self.compact = []
+        for l in range(self.L):
+            n = self.resolutions[l]
+            base = torch.floor(sup * n).long().clamp(max=n - 1)
+            ids = []
+            for off in self.corner_offsets:
+                corner = (base + off).clamp(0, n)
+                ids.append(self._linear_id(corner, n))
+            ids = torch.unique(torch.cat(ids))
+            if ids.numel() < self.tables[l].shape[0]:
+                self.tables[l] = nn.Parameter(
+                    torch.empty(ids.numel(), self.F).uniform_(-1e-4, 1e-4))
+                self.register_buffer(f"support_{l}", ids)
+                self.compact.append(True)
+            else:
+                self.register_buffer(f"support_{l}",
+                                     torch.zeros(0, dtype=torch.long))
+                self.compact.append(False)
+
+    def _linear_id(self, corner, n):
+        stride = 1
+        idx = torch.zeros(corner.shape[0], dtype=torch.long,
+                          device=corner.device)
+        for i in range(self.d):
+            idx = idx + corner[:, i] * stride
+            stride *= (n + 1)
+        return idx
+
+    def _index_level(self, corner, l, n, n_entries):
+        if not self.compact[l]:
+            return super()._index(corner, n, self.is_dense[l], n_entries)
+        sup = self.get_buffer(f"support_{l}")
+        lin = self._linear_id(corner, n)
+        pos = torch.searchsorted(sup, lin).clamp(max=sup.numel() - 1)
+        hit = sup[pos] == lin
+        if bool(hit.all()):
+            return pos
+        # Off-support corner (unseen grid): hash into the same compact table.
+        h = torch.zeros_like(lin)
+        for i in range(self.d):
+            h = torch.bitwise_xor(h, corner[:, i] * self.primes[i])
+        return torch.where(hit, pos, h % n_entries)
+
+    def forward(self, coords):
+        lead = coords.shape[:-1]
+        x = coords.reshape(-1, self.d).clamp(0.0, 1.0)
+        p = x.shape[0]
+        outs = []
+        for l in range(self.L):
+            n = self.resolutions[l]
+            table = self.tables[l]
+            pos = x * n
+            base = torch.floor(pos).long()
+            local = pos - base.float()
+            feat = torch.zeros(p, self.F, device=x.device, dtype=table.dtype)
+            for off in self.corner_offsets:
+                corner = (base + off).clamp(0, n)
+                w = torch.ones(p, device=x.device, dtype=table.dtype)
+                for i in range(self.d):
+                    w = w * torch.where(off[i].bool(), local[:, i], 1.0 - local[:, i])
+                idx = self._index_level(corner, l, n, table.shape[0])
+                feat = feat + w.unsqueeze(-1) * table[idx]
+            outs.append(feat)
+        return torch.cat(outs, dim=-1).reshape(*lead, self.output_dim)
 
 
 def healpix_nside_ladder(n_levels: int, nside_min: int = 1, nside_max: int = 128):
@@ -385,7 +470,7 @@ def build_level_gate(cfg: dict):
     encoder = g.get("encoder", "hash")
     if encoder == "healpix":
         n_levels = g.get("healpix_n_levels", g["n_levels"])
-    elif encoder in ("hash", "hash_static"):
+    elif encoder in ("hash", "hash_static", "hash_compact"):
         n_levels = g["n_levels"]
     else:
         raise ValueError(f"level_gating requires a leveled encoder, got {encoder}")
@@ -453,6 +538,18 @@ def build_geo_encoder(cfg: dict):
             nside_min=g.get("healpix_nside_min", 1),
             nside_max=g.get("healpix_nside_max", 128),
         )
+    if encoder == "hash_compact":
+        pd = Path(cfg["paths"]["patch_dir"])
+        cf = np.load(pd / "coords_full.npz")
+        support = build_patch_coords(cf["lat"], cf["lon"],
+                                     altitude=g.get("altitude"))
+        return CompactMultiResHashGrid(
+            support=torch.from_numpy(support.reshape(-1, support.shape[-1])),
+            input_dim=g.get("input_dim", 3), n_levels=g["n_levels"],
+            n_features_per_level=g["n_features_per_level"],
+            log2_hashmap_size=g["log2_hashmap_size"],
+            base_resolution=g["base_resolution"],
+            finest_resolution=g["finest_resolution"])
     if encoder == "xyz":
         return RawCoords(input_dim=g.get("input_dim", 3))
     if encoder == "sinusoidal":
