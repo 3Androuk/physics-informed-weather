@@ -410,6 +410,23 @@ method comparison into a deployment rule: fixed known ratio → conditional
 models; heterogeneous or unknown ratio → the guided unconditional model (the
 only family that survives held-out 16×).
 
+**Zero-shot ratio transfer is the deployment condition, not a stress test.**
+The CMIP6 archive is a *continuum* of resolutions (~50–250 km: EC-Earth3
+~80 km, MPI-ESM1-2-HR ~100 km, CNRM-CM6-1 ~140 km, IPSL-CM6A-LR ~250 km, and
+CMIP6 metadata bins them only nominally into 50/100/250 km), so a real input
+essentially never lands exactly on a trained ratio — deployment is always
+off-ladder. Regridding a GCM field to the nearest integer-divisor coarse grid
+closes most of the gap, but two residual mismatches remain: the small
+regridding shift itself, and the fact that a GCM's *effective* resolution is
+4–8× coarser than its grid, so the information content of "a 1° model" sits
+somewhere between the 4× and 8× rungs regardless of the grid it arrives on.
+Both mean the deployed ratio is fuzzy. Hence the held-out 16× result is not a
+robustness curiosity: it is direct evidence for the one property the
+application actually requires — a single model that degrades gracefully as the
+input ratio moves away from anything it was trained on. Conditional models,
+which bake the trained ratio into their weights (and collapse below bicubic at
+16×), can only serve the fixed-ratio niche.
+
 **Perfect prognosis, by necessity.** Training pairs GCM→truth do not exist:
 free-running climate models are not time-synchronized with reality (their
 15 March 2007 is a draw from a similar climate, not the same day). MOS-style
