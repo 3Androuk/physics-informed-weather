@@ -89,6 +89,15 @@ not in conditioning, covariance sophistication, or grid geometry.
 - Covariance-optimal initialization is catastrophic (spectrum 28× worse):
   guidance must carry high-frequency ENERGY; statistical optimality is the
   wrong objective for an init.
+- **The physics-vs-projection conjecture (section punchline):** the most
+  valuable physics in generative downscaling is not an approximate dynamical
+  residual added as soft guidance (Shu et al.'s w-term, run here at w=0) but
+  the EXACT linear conservation constraint embedded in A — block means are
+  the conservative remap, i.e. coarse-cell budget preservation — enforced
+  hard by projection. Support: the exact constraint is worth ~2× in L2,
+  larger than every conditioning/architecture effect measured; soft physics
+  terms in the literature buy percent-level gains. "Physics-informed" at
+  this scale means hard exact constraints over soft approximate ones.
 - Diagnostics figure (promoted from supplement): spectral coherence + qq —
   separates reconstructed fine scales from hallucinated-with-right-power.
 - Ensemble calibration: ~20% underdispersion at η=0; η sweep.
@@ -123,6 +132,14 @@ not in conditioning, covariance sophistication, or grid geometry.
 - Running: baseline vs geo arms; report per-channel L2/CRPS; does the
   multivariate setting change the encoder verdict (hash vs static at 20
   channels)?
+- **Conjecture test (gated on 20var checkpoints, zero-shot):** approximate-
+  physics guidance on the Tweedie estimate — same plug-in slot as the DPS
+  arm, physics residual instead of data residual. Honest residuals at 20
+  channels: specific-humidity positivity/saturation; hydrostatic thickness
+  (z500 − z850 vs layer-mean T, near-exact in ERA5, ~linear). Compare
+  physics-only vs projection-only vs both. If physics guidance adds nothing
+  on top of projection, the conjecture stands measured. (t2m alone has no
+  usable residual — which is why w=0 was right there.)
 - Written to stand regardless of run completion: framed as "does the
   single-variable anatomy transfer to the multivariate regime."
 
@@ -133,6 +150,9 @@ not in conditioning, covariance sophistication, or grid geometry.
 - Limitations: coarsened-truth ≠ real GCM distribution; ERA5 effective
   resolution; exact linear A assumption; what breaks at km-scale (learned
   vs static gap predicted to widen; no exact A across model pairs).
+- Physics-vs-projection conjecture restated as the answer to "where is the
+  physics?": hard exact constraints (conservation via A) over soft
+  approximate residuals — echo in title/abstract framing.
 - Future work, one sentence each: HEALPix backbone pilot; training-time
   (fibre) consistency and its zero-shot trade-off; temporal downscaling.
 
