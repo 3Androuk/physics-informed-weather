@@ -98,7 +98,10 @@ def main():
     n = min(args.n_test_samples, len(ds))
     # spread over the whole test period: the first N fields are one contiguous
     # winter month, which biases absolute scores by several percent
-    sel = np.linspace(0, len(ds) - 1, n).astype(int)
+    # .round(), not truncation: evaluate_guided / evaluate_diffusion round,
+    # and at n=16 truncation picks 6 different fields out of 16.
+    sel = np.unique(np.linspace(0, len(ds) - 1, n).round().astype(int))
+    n = len(sel)
     print(f"{n}/{len(ds)} test fields (spread over the test period) | "
           f"ratios {args.ratios} | nside {nside}")
 
@@ -108,7 +111,10 @@ def main():
     for ratio in args.ratios:
         if nside % ratio:
             print(f"  skip {ratio}x: nside {nside} not divisible"); continue
-        methods = ("cascade", "naive", "bilinear")
+        # cascade needs nside_lf * native <= nside_target, so it is undefined
+        # for a ratio FINER than the model's native one (nothing to cascade).
+        methods = ((("cascade",) if ratio >= native else ())
+                   + ("naive", "bilinear"))
         sq = {m: 0.0 for m in methods}
         spec = {m: [] for m in methods}
         n_px = 0
@@ -121,12 +127,12 @@ def main():
                 y = torch.stack([ds[int(i)] for i in idx]).to(device)
                 lf = coarsen_faces(y, ratio)
                 preds = {
-                    # Ekström-style: native ratio, then interpolate
-                    "cascade": cascade(ckpt, lf, ratio, native, device, cache),
                     # what we did before: feed the OOD-degraded field directly
                     "naive": naive_model(upsample_nearest_faces(lf, ratio)),
                     "bilinear": upsample_bilinear_faces(lf, ratio, pad1),
                 }
+                if ratio >= native:   # Ekström-style: native ratio, then interpolate
+                    preds["cascade"] = cascade(ckpt, lf, ratio, native, device, cache)
                 truth = normalizer.decode(y).cpu().numpy()[:, :, 0]
                 truth_imgs = faces_as_images(truth)
                 n_px += truth.size
@@ -138,9 +144,10 @@ def main():
                      "spectrum_log_l1": float(np.mean(spec[m]))} for m in methods}
         out["ratios"][f"{ratio}x"] = entry
         tag = "  (native)" if ratio == native else ""
-        print(f"  {ratio}x{tag}: cascade {entry['cascade']['rmse']:.4f} | "
-              f"naive {entry['naive']['rmse']:.4f} | "
-              f"bilinear {entry['bilinear']['rmse']:.4f} {units}")
+        # `cascade` is absent for a ratio finer than native (see methods above).
+        print(f"  {ratio}x{tag}: "
+              + "".join(f"{m} {entry[m]['rmse']:.4f} | " for m in methods)
+              + units)
 
     path = Path(results_dir) / "zero_shot.json"
     with open(path, "w") as f:

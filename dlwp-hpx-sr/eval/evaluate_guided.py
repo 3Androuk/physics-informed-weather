@@ -48,6 +48,10 @@ def main():
     ap.add_argument("--ratios", type=int, nargs="+", default=None,
                     help="subset of the configured ratios to run")
     ap.add_argument("--n-test-samples", type=int, default=None)
+    ap.add_argument("--contiguous", action="store_true",
+                    help="take the FIRST n test fields instead of a uniform "
+                         "spread. test.npy is in time order, so this is one "
+                         "contiguous window (n=16 -> 16 days).")
     ap.add_argument("--stride", type=int, default=None,
                     help="DDIM timestep stride; >1 trades accuracy for speed")
     ap.add_argument("--no-project", action="store_true",
@@ -55,6 +59,11 @@ def main():
                          " with an unconditional prior it is the ONLY link to"
                          " the observation)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--ensemble", type=int, default=1,
+                    help="draw N guided reconstructions per field and "
+                         "also score their mean as `guided_ens` (the "
+                         "posterior-mean estimator, comparable to the "
+                         "MSE-trained regressor).")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -84,12 +93,16 @@ def main():
 
     ds = HPXDataset(hpx_dir / "test.npy", normalizer)
     n = min(args.n_test_samples or ec["n_test_samples"] or len(ds), len(ds))
+    # test.npy is in TIME ORDER, so range(n) is a contiguous window (n=16 ->
+    # the first 16 days). Spread the sample over the whole record instead.
+    field_idx = (np.arange(n) if args.contiguous
+                 else np.unique(np.linspace(0, len(ds) - 1, n).round().astype(int)))
+    n = len(field_idx)
     recons = [r for r in sc["reconstructions"]
               if args.ratios is None or int(r["ratio"]) in args.ratios]
-    # spread over the test period: the first N fields are one contiguous
-    # winter month, which biases absolute scores by several percent
-    sel = np.linspace(0, len(ds) - 1, n).astype(int)
-    print(f"{n}/{len(ds)} test fields (spread over the test period) | ratios "
+    print(f"{n}/{len(ds)} test fields "
+          f"({'first-N' if args.contiguous else 'uniform spread'}, "
+          f"idx {field_idx[0]}..{field_idx[-1]}) | ratios "
           f"{[r['ratio'] for r in recons]} | project {project} | stride {stride}")
 
     _, plat = pixel_lonlat_deg(nside)
@@ -99,13 +112,18 @@ def main():
 
     out = {"checkpoint": str(ckpt_path), "epoch": int(ckpt["epoch"]),
            "n_samples": n, "nside": nside, "units": units,
-           "project": project, "stride": stride, "ratios": {}}
+           "sampling": "contiguous" if args.contiguous else "spread",
+           "field_indices": [int(i) for i in field_idx],
+           "project": project, "stride": stride,
+           "n_ensemble": int(max(1, args.ensemble)), "ratios": {}}
     batch = int(ec.get("batch_size", 2))
 
     for rc in recons:
         ratio, K, t_steps = int(rc["ratio"]), int(rc["K"]), list(rc["t_steps"])
         padder1 = HEALPixPadding(nside // ratio, 1).to(device)
-        methods = ("guided", "bilinear", "nearest")
+        n_ens = max(1, int(args.ensemble))
+        methods = (("guided", "bilinear", "nearest")
+                   + (("guided_ens",) if n_ens > 1 else ()))
         sq = {m: 0.0 for m in methods}
         ab = {m: 0.0 for m in methods}
         bias = {m: 0.0 for m in methods}
@@ -115,29 +133,40 @@ def main():
         n_px = 0
         dc_max = 0.0
         t_sample = 0.0
+        spread_sum = 0.0
         print(f"\n=== ratio {ratio}x | K={K} t_steps={t_steps} "
               f"({K * sum(t_steps) // max(stride,1) // K if K else 0} steps/loop avg) ===")
 
         with torch.no_grad():
             for start in range(0, n, batch):
-                idx = sel[start:start + batch]
+                idx = field_idx[start:min(start + batch, n)]
                 y = torch.stack([ds[int(i)] for i in idx]).to(device)
                 lf = coarsen_faces(y, ratio)
                 x_g = degrade_faces(y, ratio)      # nearest-upsampled guidance
 
                 t0 = time.time()
-                g = torch.Generator(device=device).manual_seed(args.seed + start)
-                pred = diffusion.guided_reconstruct(
-                    model, x_g, t_steps=t_steps, K=K, eta=sc.get("eta", 0.0),
-                    stride=stride, project=project, lf=lf, ratio=ratio,
-                    generator=g)
+                members = []
+                for e in range(n_ens):
+                    g = torch.Generator(device=device).manual_seed(
+                        args.seed + 10007 * e + start)
+                    members.append(diffusion.guided_reconstruct(
+                        model, x_g, t_steps=t_steps, K=K, eta=sc.get("eta", 0.0),
+                        stride=stride, project=project, lf=lf, ratio=ratio,
+                        generator=g))
                 t_sample += time.time() - t0
+                pred = members[0]          # single sample: unchanged meaning
+                if n_ens > 1:
+                    stack = torch.stack(members)
+                    pred_ens = stack.mean(0)
+                    spread_sum += float(stack.std(0).mean()) * len(idx)
 
                 dc_max = max(dc_max,
                              float((coarsen_faces(pred, ratio) - lf).abs().max()))
                 preds = {"guided": pred,
                          "bilinear": upsample_bilinear_faces(lf, ratio, padder1),
                          "nearest": x_g}
+                if n_ens > 1:
+                    preds["guided_ens"] = pred_ens
                 truth_K = normalizer.decode(y).cpu().numpy()[:, :, 0]
                 truth_imgs = faces_as_images(truth_K)
                 n_px += truth_K.size

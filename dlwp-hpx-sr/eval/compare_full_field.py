@@ -41,6 +41,9 @@ from data.download_era5 import _open_da  # noqa: E402
 from eval.metrics import l2_norm, spectrum_log_l1  # noqa: E402
 from hpx.remap import hpx_to_latlon, hpx_to_latlon_sht  # noqa: E402
 from models.hpx_unet import build_model  # noqa: E402
+from models.hpx_diffusion import build_diffusion  # noqa: E402
+from train.train_prior import build_prior_model  # noqa: E402
+from data.degrade import coarsen_faces  # noqa: E402
 from utils import ensure_dir, get_device, load_config  # noqa: E402
 
 
@@ -67,6 +70,20 @@ def main():
                     help="mesh -> lat-lon method: plain spherical bilinear, or "
                          "spherical-harmonic resampling (band-limited analysis "
                          "+ synthesis at 4x mesh resolution)")
+    ap.add_argument("--guided", action="store_true",
+                    help="score a guided diffusion PRIOR (guided_reconstruct "
+                         "with the exact mesh projection) instead of the "
+                         "deterministic regressor")
+    ap.add_argument("--prior-config", default="config/prior.yaml",
+                    help="--guided: config holding the prior's ckpt_dir and "
+                         "its per-ratio K / t_steps schedule")
+    ap.add_argument("--ratios", type=int, nargs="+", default=None,
+                    help="ratios to score (default: the config's sr.ratio)")
+    ap.add_argument("--ensemble", type=int, default=1,
+                    help="--guided: average N reconstructions. Both the single "
+                         "sample and the mean are reported -- they sit at "
+                         "different points of the distortion-perception curve.")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=120)
     args = ap.parse_args()
 
@@ -76,14 +93,34 @@ def main():
     hpx_dir = Path(cfg["paths"]["hpx_dir"])
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
 
-    ckpt_path = Path(cfg["paths"]["ckpt_dir"]) / (
-        args.checkpoint or cfg["eval"]["checkpoint"])
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    normalizer = Normalizer(ckpt["norm_mean"], ckpt["norm_std"])
-    model = build_model(ckpt["config"]).to(device)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-    print(f"Loaded {ckpt_path} (epoch {ckpt['epoch']})")
+    if args.guided:
+        pcfg = load_config(args.prior_config)
+        ckpt_path = Path(pcfg["paths"]["ckpt_dir"]) / (
+            args.checkpoint or pcfg["eval"].get("checkpoint", "best.pt"))
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        normalizer = Normalizer(ckpt["norm_mean"], ckpt["norm_std"])
+        model = build_prior_model(ckpt["config"]).to(device)
+        use_ema = bool(pcfg["eval"].get("use_ema", True) and ckpt.get("ema"))
+        model.load_state_dict(ckpt["ema"] if use_ema else ckpt["model"])
+        model.eval()
+        diffusion = build_diffusion(ckpt["config"]).to(device)
+        sched = {int(r["ratio"]): (int(r["K"]), list(r["t_steps"]))
+                 for r in pcfg["sample"]["reconstructions"]}
+        proj = bool(pcfg["sample"].get("project", True))
+        eta = float(pcfg["sample"].get("eta", 0.0))
+        stride = int(pcfg["sample"].get("stride", 1))
+        print(f"Loaded PRIOR {ckpt_path} (epoch {ckpt['epoch']}, "
+              f"{'EMA' if use_ema else 'raw'}) | project={proj} "
+              f"| ensemble={max(1, args.ensemble)}")
+    else:
+        ckpt_path = Path(cfg["paths"]["ckpt_dir"]) / (
+            args.checkpoint or cfg["eval"]["checkpoint"])
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        normalizer = Normalizer(ckpt["norm_mean"], ckpt["norm_std"])
+        model = build_model(ckpt["config"]).to(device)
+        model.load_state_dict(ckpt["model"])
+        model.eval()
+        print(f"Loaded {ckpt_path} (epoch {ckpt['epoch']})")
 
     test = np.load(hpx_dir / "test.npy", mmap_mode="r")
     times = np.load(hpx_dir / "test_times.npy")
@@ -105,42 +142,88 @@ def main():
         truth = truth[:, ::-1]                     # back to the raw row order
     print(f"truth fetched: {truth.shape} in K")
 
-    # ── DLWP-HPX prediction on the same timestamps ────────────────────────
+    # ── Predictions on the same timestamps, per ratio ─────────────────────
     y_faces = np.asarray(test[idxs], dtype=np.float32)          # (N, 12, F, F) K
     y = normalizer.encode(torch.from_numpy(y_faces))[:, :, None]  # (N,12,1,F,F)
-    with torch.no_grad():
-        preds = []
-        for i in range(len(idxs)):                # batch 1: modest VRAM
-            x = degrade_faces(y[i:i + 1].to(device), ratio)
-            preds.append(model(x).cpu())
-        pred = torch.cat(preds)
-    pred_K = normalizer.decode(pred)[:, :, 0].numpy()            # (N, 12, F, F)
-
     remap_fn = hpx_to_latlon if args.remap == "bilinear" else hpx_to_latlon_sht
-    print(f"remapping mesh -> band grid ({args.remap}) ...")
-    pred_ll = remap_fn(pred_K, band_lat, band_lon)               # (N, H_band, W)
-    floor_ll = remap_fn(y_faces, band_lat, band_lon)             # remap floor
-
-    # ── Sibling-style bicubic from the TRUE lat-lon field ─────────────────
-    t = torch.from_numpy(np.ascontiguousarray(crop_to_multiple(truth, args.align)))[:, None]
-    bic = F.interpolate(F.avg_pool2d(t, ratio), size=t.shape[-2:],
-                        mode="bicubic", align_corners=False)[:, 0].numpy()
-
     truth_c = crop_to_multiple(truth, args.align)
-    rows = {
-        "DLWP-HPX (remapped)": crop_to_multiple(pred_ll, args.align),
-        "Bicubic (validation)": bic,
-        "HPX truth remap floor": crop_to_multiple(floor_ll, args.align),
-    }
+    n_ens = max(1, int(args.ensemble))
+
+    # The remap floor is ratio-independent (it is the mesh -> grid error of the
+    # TRUTH), so compute it once. It is the penalty the mesh model pays and the
+    # patch models do not.
+    floor_ll = crop_to_multiple(remap_fn(y_faces, band_lat, band_lon), args.align)
+
     out = {"n_fields": int(args.n_fields), "field_idxs": [int(i) for i in idxs],
-           "grid": list(truth_c.shape[-2:]), "ratio": ratio, "remap": args.remap}
-    for name, rec in rows.items():
-        out[name] = {"l2": l2_norm(rec, truth_c),
-                     "spectrum_log_l1": spectrum_log_l1(rec, truth_c)}
-        print(f"{name:24s} l2 {out[name]['l2']:.4f} K | "
-              f"spec {out[name]['spectrum_log_l1']:.4f}")
+           "grid": list(truth_c.shape[-2:]), "remap": args.remap,
+           "guided": bool(args.guided), "n_ensemble": n_ens,
+           "HPX truth remap floor": {
+               "l2": l2_norm(floor_ll, truth_c),
+               "spectrum_log_l1": spectrum_log_l1(floor_ll, truth_c)},
+           "ratios": {}}
+    print(f"{'HPX truth remap floor':28s} l2 "
+          f"{out['HPX truth remap floor']['l2']:.4f} K | "
+          f"spec {out['HPX truth remap floor']['spectrum_log_l1']:.4f}")
+
+    for r in (args.ratios or [ratio]):
+        print(f"\n=== ratio {r}x ===")
+        rows = {}
+        with torch.no_grad():
+            if args.guided:
+                if r not in sched:
+                    print(f"  no K/t_steps for {r}x in {args.prior_config}; skipping")
+                    continue
+                K, t_steps = sched[r]
+                print(f"  K={K} t_steps={t_steps} project={proj}")
+                singles, means = [], []
+                for i in range(len(idxs)):            # batch 1: modest VRAM
+                    yi = y[i:i + 1].to(device)
+                    lf = coarsen_faces(yi, r)
+                    x_g = degrade_faces(yi, r)
+                    members = []
+                    for e in range(n_ens):
+                        g = torch.Generator(device=device).manual_seed(
+                            args.seed + 10007 * e + i)
+                        members.append(diffusion.guided_reconstruct(
+                            model, x_g, t_steps=t_steps, K=K, eta=eta,
+                            stride=stride, project=proj, lf=lf, ratio=r,
+                            generator=g))
+                    singles.append(members[0].cpu())
+                    means.append(torch.stack(members).mean(0).cpu())
+                    print(f"  field {i+1}/{len(idxs)} done", flush=True)
+                rows["Mesh prior (single)"] = torch.cat(singles)
+                if n_ens > 1:
+                    rows[f"Mesh prior (ens {n_ens})"] = torch.cat(means)
+            else:
+                preds = []
+                for i in range(len(idxs)):
+                    x = degrade_faces(y[i:i + 1].to(device), r)
+                    preds.append(model(x).cpu())
+                rows["DLWP-HPX (remapped)"] = torch.cat(preds)
+
+        entry = {}
+        print(f"  remapping mesh -> band grid ({args.remap}) ...")
+        for name, pred in rows.items():
+            pk = normalizer.decode(pred)[:, :, 0].numpy()
+            rec = crop_to_multiple(remap_fn(pk, band_lat, band_lon), args.align)
+            entry[name] = {"l2": l2_norm(rec, truth_c),
+                           "spectrum_log_l1": spectrum_log_l1(rec, truth_c)}
+
+        # Sibling-style bicubic from the TRUE lat-lon field, at this ratio
+        t = torch.from_numpy(np.ascontiguousarray(truth_c))[:, None]
+        bic = F.interpolate(F.avg_pool2d(t, r), size=t.shape[-2:],
+                            mode="bicubic", align_corners=False)[:, 0].numpy()
+        entry["Bicubic (validation)"] = {
+            "l2": l2_norm(bic, truth_c),
+            "spectrum_log_l1": spectrum_log_l1(bic, truth_c)}
+
+        for name, m in entry.items():
+            print(f"  {name:28s} l2 {m['l2']:.4f} K | spec {m['spectrum_log_l1']:.4f}")
+        out["ratios"][f"{r}x"] = entry
 
     suffix = "" if args.remap == "bilinear" else f"_{args.remap}"
+    if args.guided:
+        suffix += f"_guided_ens{n_ens}" if n_ens > 1 else "_guided"
     path = Path(results_dir) / f"compare_full_field{suffix}.json"
     with open(path, "w") as f:
         json.dump(out, f, indent=2)

@@ -47,6 +47,9 @@ def main():
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--n-steps", type=int, default=None, help="override eval.n_steps")
     ap.add_argument("--n-test-samples", type=int, default=None)
+    ap.add_argument("--contiguous", action="store_true",
+                    help="take the FIRST n test fields instead of a uniform "
+                         "spread (test.npy is in time order).")
     ap.add_argument("--ensemble", type=int, default=None)
     ap.add_argument("--no-project", action="store_true",
                     help="ablate the exact mesh data-consistency projection")
@@ -89,6 +92,11 @@ def main():
     n = len(ds) if ec["n_test_samples"] is None else min(ec["n_test_samples"], len(ds))
     if args.n_test_samples:
         n = min(args.n_test_samples, len(ds))
+    # test.npy is in TIME ORDER; range(n) would be a contiguous window. Use the
+    # SAME linspace spread as eval/evaluate_guided.py so the two runs are paired.
+    field_idx = (np.arange(n) if args.contiguous
+                 else np.unique(np.linspace(0, len(ds) - 1, n).round().astype(int)))
+    n = len(field_idx)
     print(f"Sampling {n}/{len(ds)} test fields | {n_steps} DDIM steps | "
           f"eta {ec['eta']} | project {project} | ensemble {n_members} | "
           f"residual scale {res_scale:.5f}")
@@ -114,8 +122,8 @@ def main():
     batch = int(ec.get("batch_size", 2))
     with torch.no_grad():
         for start in range(0, n, batch):
-            idx = range(start, min(start + batch, n))
-            y = torch.stack([ds[i] for i in idx]).to(device)   # (B,12,1,F,F)
+            idx = field_idx[start:min(start + batch, n)]
+            y = torch.stack([ds[int(i)] for i in idx]).to(device)   # (B,12,1,F,F)
             lf = coarsen_faces(y, ratio)
             x_up = degrade_faces(y, ratio)
             mean = mean_field(x_up)

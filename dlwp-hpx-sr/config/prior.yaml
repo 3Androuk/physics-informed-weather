@@ -76,6 +76,9 @@ sample:
   stride: 1                          # timestep subsequence stride
   project: true                      # exact mesh data-consistency projection
   reconstructions:
+    - ratio: 2                       # t0 scales ~linearly with ratio (4->160,
+      K: 3                           # 8->320, 16->640), so 2 -> 80; K and the
+      t_steps: [80, 57, 40]          # 1/sqrt2 decay mirror the 4x arm
     - ratio: 4
       K: 3
       t_steps: [160, 114, 80]
