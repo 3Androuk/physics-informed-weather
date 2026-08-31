@@ -40,7 +40,7 @@ from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # n
 
 
 def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
-           project=False):
+           project=False, post_x0=None):
     it = range(0, len(hf), batch)
     try:
         from tqdm import tqdm
@@ -51,12 +51,29 @@ def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
     for i in it:
         c = None if coords is None else coords[i:i + batch]
         outs.append(reconstruct_diffusion(diffusion, model, hf[i:i + batch], ratio, rc,
-                                          eta=eta, coords=c, project=project).cpu())
+                                          eta=eta, coords=c, project=project,
+                                          post_x0=post_x0).cpu())
     return torch.cat(outs, dim=0)
 
 
-def _payload(patch_dir, normalizer, n, geo_cfg, device):
-    """Geo payload stack for the first n test patches, per one model's config."""
+def _select_indices(total, n, contiguous=False):
+    """Which test patches to evaluate on.
+
+    The test split is stored in TIME ORDER (make_patches writes it with
+    shuffle=False), so range(n) is a contiguous window -- with per_field=8 over
+    731 daily fields, n=64 is the first 8 days of the record. Spread the
+    selection across the whole split instead, so the sample spans both test
+    years and every season.
+    """
+    if n >= total:
+        return np.arange(total)
+    if contiguous:
+        return np.arange(n)
+    return np.unique(np.linspace(0, total - 1, n).round().astype(int))
+
+
+def _payload(patch_dir, normalizer, sel, geo_cfg, device):
+    """Geo payload for test patches `sel`, per one model's config."""
     ds = PatchDataset(
         patch_dir / "test_patches.npy", normalizer,
         origins_path=patch_dir / "test_origins.npy",
@@ -66,7 +83,7 @@ def _payload(patch_dir, normalizer, n, geo_cfg, device):
         healpix_index_path=((patch_dir / geo_cfg["healpix_index"])
                             if geo_cfg.get("healpix_index") else None),
     )
-    return torch.stack([ds[i][1] for i in range(n)]).to(device)
+    return torch.stack([ds[int(i)][1] for i in sel]).to(device)
 
 
 def main():
@@ -81,6 +98,17 @@ def main():
     ap.add_argument("--base-ckpt", default="diffusion.pt",
                     help="legacy pair mode: model B (may be geo or plain)")
     ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--n-patches", type=int, default=None,
+                    help="override eval.n_test_patches")
+    ap.add_argument("--contiguous", action="store_true",
+                    help="take the FIRST n test patches instead of a uniform "
+                         "spread. The test split is in time order, so this is "
+                         "one contiguous window (n=64 -> 8 days). Only for "
+                         "reproducing results computed before the fix.")
+    ap.add_argument("--hydrostatic", type=float, default=0.0,
+                    help="strength of the inference-time hydrostatic "
+                         "constraint (0 = off, 1 = exactly balanced). "
+                         "Applied to x0 at every DDIM step.")
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
     ap.add_argument("--project", action="store_true",
@@ -112,8 +140,13 @@ def main():
     ckpt_dir = Path(cfg["paths"]["ckpt_dir"])
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
     normalizer = load_norm_stats(patch_dir)
-    n = min(cfg["eval"]["n_test_patches"],
-            len(PatchDataset(patch_dir / "test_patches.npy", normalizer)))
+    total = len(PatchDataset(patch_dir / "test_patches.npy", normalizer))
+    sel = _select_indices(total, args.n_patches or cfg["eval"]["n_test_patches"],
+                          contiguous=args.contiguous)
+    n = len(sel)
+    print(f"evaluating {n} of {total} test patches "
+          f"({'first-N, contiguous' if args.contiguous else 'uniform spread'}), "
+          f"idx {sel[0]}..{sel[-1]}")
 
     # ── Load every checkpoint; each builds the geo payload ITS config needs ─
     ckpt_names = args.ckpts or [args.geo_ckpt, args.base_ckpt]
@@ -124,7 +157,7 @@ def main():
         model, diff, cfg_ck = load_diffusion(path, device)
         geo_on = cfg_ck.get("geo", {}).get("enabled", False)
         encoder = cfg_ck["geo"].get("encoder", "hash") if geo_on else "-"
-        coords = _payload(patch_dir, normalizer, n, cfg_ck["geo"], device) if geo_on else None
+        coords = _payload(patch_dir, normalizer, sel, cfg_ck["geo"], device) if geo_on else None
         disp = Path(name).stem
         if disp in seen:  # same stem from different directories
             seen[disp] += 1
@@ -147,7 +180,9 @@ def main():
 
     tag_names = "_vs_".join(d for d, *_ in models) if len(models) <= 2 \
         else f"{len(models)}way"
+    sampling = "contiguous" if args.contiguous else "spread"
     stem = (f"compare_{tag_names}{'_proj' if args.project else ''}"
+            f"{('_hyd%g' % args.hydrostatic) if args.hydrostatic else ''}"
             f"{'_shufgeo' if args.shuffle_geo else ''}")
     if args.eta is not None:
         stem += f"_eta{args.eta:g}"
@@ -160,15 +195,23 @@ def main():
     else:
         var_names = [cfg["data"].get("variable", "field")]
 
+    hydro = None
+    if args.hydrostatic:
+        from models.hydrostatic_constraint import HydrostaticProjection
+        hydro = HydrostaticProjection(cfg, normalizer, coef=args.hydrostatic,
+                                      device=device)
+        print(f"hydrostatic constraint ON, coef={args.hydrostatic}")
+
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
-    hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
+    hf = torch.stack([ds_plain[int(i)] for i in sel]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
 
     table, spectra = {}, {"Reference": radial_power_spectrum(hf_phys)}
     for rc in cfg["sample"]["reconstructions"]:
         ratio = rc["ratio"]; tag = f"{ratio}x"
         preds = {disp: _recon(dif, mod, hf, ratio, rc, eta, coords, args.batch,
-                              label=f"{tag} {disp}", project=args.project)
+                              label=f"{tag} {disp}", project=args.project,
+                              post_x0=hydro)
                  for disp, mod, dif, coords, _ in models}
         preds["Bicubic"] = torch.cat(
             [reconstruct_bicubic(hf[i:i + args.batch], ratio).cpu()
@@ -227,6 +270,11 @@ def main():
                       f"CRPS {row['crps']:.4f} | spread {row['spread']:.4f}")
         table["ensemble"] = ens
 
+    table["config"] = {
+        "n_patches": int(n), "n_total": int(total), "sampling": sampling,
+        "patch_indices": [int(i) for i in sel],
+        "project": bool(args.project), "hydrostatic": float(args.hydrostatic),
+    }
     with open(results_dir / f"{stem}.json", "w") as f:
         json.dump(table, f, indent=2)
     _plot(spectra, results_dir / f"{stem}_spectrum.png")

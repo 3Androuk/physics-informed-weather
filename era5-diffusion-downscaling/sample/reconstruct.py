@@ -101,7 +101,8 @@ def load_directmap(ckpt_path, device):
 
 @torch.no_grad()
 def reconstruct_diffusion(diffusion, model, hf_norm, ratio, recon_cfg,
-                          eta=0.0, progress=False, coords=None, project=False):
+                          eta=0.0, progress=False, coords=None, project=False,
+                          post_x0=None):
     """Guided diffusion reconstruction of `hf_norm` degraded at `ratio`.
 
     `coords` (B,H,W,d) is required for a geo-conditioned model and ignored
@@ -114,6 +115,7 @@ def reconstruct_diffusion(diffusion, model, hf_norm, ratio, recon_cfg,
     return diffusion.guided_reconstruct(
         model, x_g, t_steps=recon_cfg["t_steps"], K=recon_cfg["K"], eta=eta,
         progress=progress, cond=coords, project=project, lf=lf, ratio=ratio,
+        post_x0=post_x0,
     )
 
 

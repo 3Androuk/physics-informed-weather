@@ -91,6 +91,7 @@ class GaussianDiffusion(nn.Module):
         lf: torch.Tensor = None,
         ratio: int = None,
         init_noise: torch.Tensor = None,
+        post_x0=None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -161,6 +162,13 @@ class GaussianDiffusion(nn.Module):
                 eps_theta = model(x, t_batch) if cond is None else model(x, t_batch, cond)
 
                 x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
+                # Physics FIRST, projection LAST: the projection must have the
+                # final word or the constraint term silently breaks data
+                # consistency (the last step returns x0_pred unchanged), which
+                # lets it move the observed block means. Ordered this way the
+                # physics correction is confined to the null space of A.
+                if post_x0 is not None:   # e.g. hydrostatic constraint
+                    x0_pred = post_x0(x0_pred)
                 if project:
                     x0_pred = x0_pred + upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
                 sigma = eta * (
