@@ -127,16 +127,27 @@ def stitch_tiles(fn, lf_full: torch.Tensor, tile: int, overlap: int,
     return out / wsum
 
 
-def _project_final(out: torch.Tensor, coarse_full: torch.Tensor, ratio: int) -> torch.Tensor:
-    """Exact global block-average projection: coarsen(out) == observation."""
-    return out + upsample_nearest(coarse_full - coarsen(out, ratio), out.shape[-2:])
+def _project_final(out: torch.Tensor, coarse_full: torch.Tensor, ratio: int,
+                   observed=None) -> torch.Tensor:
+    """Exact global block-average projection: coarsen(out) == observation.
+
+    `observed` (optional bool per channel) restricts the projection to
+    channels that carry a real observation — unobserved (generated) channels
+    are left untouched."""
+    corr = upsample_nearest(coarse_full - coarsen(out, ratio), out.shape[-2:])
+    if observed is not None:
+        obs = torch.as_tensor(observed, dtype=torch.bool,
+                              device=out.device).view(1, -1, 1, 1)
+        corr = corr * obs
+    return out + corr
 
 
 @torch.no_grad()
 def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, ratio,
                                      recon_cfg, eta=0.0, tile=128, overlap=32,
                                      batch=8, geo_full=None, project_steps=False,
-                                     project_final=True, generator=None):
+                                     project_final=True, generator=None,
+                                     observed=None):
     """Tiled guided-diffusion reconstruction of one full field.
 
     lf_full: (1, C, H, W) noise-mixing guidance (globally degraded, normalized);
@@ -144,7 +155,9 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
     mixing epsilon is cropped per tile from a global noise field. With
     project_steps=True the per-step ILVR projection also runs inside every
     tile (tile origins are ratio-aligned, so tile observations are exact crops
-    of the global one)."""
+    of the global one). `observed` (bool per channel) marks channels carrying
+    a real observation — unobserved channels are generated (channel
+    inpainting) and excluded from every projection."""
     K = int(recon_cfg["K"])
     noise_full = _global_noise((K, *lf_full.shape), lf_full, generator)
 
@@ -155,10 +168,12 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
         lf_tiles = _crop_coarse(coarse_full, origins, tile, ratio) if project_steps else None
         return diffusion.guided_reconstruct(
             model, x_g, t_steps=recon_cfg["t_steps"], K=K, eta=eta, cond=coords,
-            project=project_steps, lf=lf_tiles, ratio=ratio, init_noise=eps)
+            project=project_steps, lf=lf_tiles, ratio=ratio, init_noise=eps,
+            observed=observed)
 
     out = stitch_tiles(fn, lf_full, tile, overlap, align=ratio, batch=batch)
-    return _project_final(out, coarse_full, ratio) if project_final else out
+    return (_project_final(out, coarse_full, ratio, observed=observed)
+            if project_final else out)
 
 
 @torch.no_grad()

@@ -91,6 +91,7 @@ class GaussianDiffusion(nn.Module):
         lf: torch.Tensor = None,
         ratio: int = None,
         init_noise: torch.Tensor = None,
+        observed: torch.Tensor = None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -106,6 +107,17 @@ class GaussianDiffusion(nn.Module):
         block averages are pinned to the observed input (ILVR-style data
         consistency). Without it the input is consulted only once, at the
         noise-mixing initialization, and the chain is free to drift.
+
+        `observed` (optional, bool per channel, length C) marks which channels
+        carry a real observation — channel-wise inpainting. Unobserved
+        channels get ZERO guidance at the first noise-mixing init (= sample
+        around the prior mean; later K loops refine them from the previous
+        reconstruction like every other channel) and are excluded from the
+        projection, so the model GENERATES them consistent with the observed
+        ones instead of pinning them to placeholder values. The operator is
+        then A = coarsen ∘ select-channels — still linear and known only at
+        inference, so the zero-shot property is unchanged. lf may hold
+        anything in unobserved slots; it is masked before use.
 
         Args:
             model: trained noise predictor eps_theta(x_t, t).
@@ -131,7 +143,18 @@ class GaussianDiffusion(nn.Module):
             assert lf is not None and ratio is not None, "project=True needs lf and ratio"
             from data.degrade import coarsen, upsample_nearest
             hw = x_guidance.shape[-2:]
-        x_g = x_guidance
+        obs = None
+        if observed is not None:
+            obs = torch.as_tensor(observed, dtype=torch.bool,
+                                  device=x_guidance.device)
+            assert obs.numel() == x_guidance.shape[1], (
+                f"observed has {obs.numel()} entries for "
+                f"{x_guidance.shape[1]} channels")
+            if bool(obs.all()):
+                obs = None
+            else:
+                obs = obs.view(1, -1, 1, 1)
+        x_g = x_guidance if obs is None else x_guidance * obs
         device = x_guidance.device
         iterator = range(K)
         if progress:
@@ -162,7 +185,8 @@ class GaussianDiffusion(nn.Module):
 
                 x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
                 if project:
-                    x0_pred = x0_pred + upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
+                    corr = upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
+                    x0_pred = x0_pred + (corr if obs is None else corr * obs)
                 sigma = eta * (
                     ((1 - a_prev) / (1 - a_i)).clamp(min=0).sqrt()
                     * (1 - a_i / a_prev).clamp(min=0).sqrt()
