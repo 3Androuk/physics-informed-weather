@@ -33,7 +33,8 @@ import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import PatchDataset, load_norm_stats  # noqa: E402
-from eval.metrics import radial_power_spectrum, spectrum_log_l1, l2_norm  # noqa: E402
+from eval.metrics import (radial_power_spectrum, spectrum_log_l1,  # noqa: E402
+                          l2_norm, l2_norm_weighted, patch_latitudes)
 from sample.reconstruct import (load_diffusion, reconstruct_bicubic,  # noqa: E402
                                 reconstruct_diffusion)
 from utils import ensure_dir, get_device, init_wandb, load_config, run_name  # noqa: E402
@@ -205,6 +206,11 @@ def main():
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
     hf = torch.stack([ds_plain[int(i)] for i in sel]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
+    # Latitude-weighted RMSE (WeatherBench2 convention) alongside plain L2;
+    # None on legacy patch dirs without saved origins/coords.
+    lat = patch_latitudes(patch_dir, sel, hf.shape[-2])
+    if lat is None:
+        print("  (no origins/coords_full.npz — latitude-weighted RMSE skipped)")
 
     table, spectra = {}, {"Reference": radial_power_spectrum(hf_phys)}
     for rc in cfg["sample"]["reconstructions"]:
@@ -227,15 +233,25 @@ def main():
             row[name] = {"l2": l2_norm(pp, hf_phys),
                          "spectrum_log_l1": spectrum_log_l1(pp, hf_phys),
                          "l2_normalized": l2_norm(p, hf.cpu())}
+            if lat is not None:
+                # Area-weighted counterpart of l2_normalized (unit-free, so it
+                # is the one to quote across variables).
+                row[name]["l2_normalized_latweighted"] = l2_norm_weighted(
+                    p, hf.cpu(), lat)
             if pp.shape[1] == len(var_names) and len(var_names) > 1:
                 row[name]["per_variable"] = {
                     vn: {"l2": l2_norm(pp[:, c:c + 1], hf_phys[:, c:c + 1]),
                          "spectrum_log_l1": spectrum_log_l1(pp[:, c:c + 1],
-                                                            hf_phys[:, c:c + 1])}
+                                                            hf_phys[:, c:c + 1]),
+                         **({"l2_latweighted": l2_norm_weighted(
+                             pp[:, c:c + 1], hf_phys[:, c:c + 1], lat)}
+                            if lat is not None else {})}
                     for c, vn in enumerate(var_names)}
             spectra[f"{name} {tag}"] = radial_power_spectrum(pp)
-            print(f"  {tag} {name:28s} | L2(norm) {row[name]['l2_normalized']:.4f} "
-                  f"| L2(phys,pooled) {row[name]['l2']:.4f} | "
+            lw = (f" | L2(norm,lat-w) {row[name]['l2_normalized_latweighted']:.4f}"
+                  if lat is not None else "")
+            print(f"  {tag} {name:28s} | L2(norm) {row[name]['l2_normalized']:.4f}"
+                  f"{lw} | L2(phys,pooled) {row[name]['l2']:.4f} | "
                   f"spec-logL1 {row[name]['spectrum_log_l1']:.4f}")
         table[tag] = row
         _qualitative(normalizer, hf, preds, ratio, rc,
@@ -264,6 +280,9 @@ def main():
                     "crps": crps_ensemble(members, hf_e_phys),
                     "spread": float(stack.std(0).mean()),
                 }
+                if lat is not None:
+                    row["ensemble_mean_l2_latweighted"] = l2_norm_weighted(
+                        stack.mean(0), hf_e_phys, lat[:n_e])
                 ens.setdefault(tag, {})[disp] = row
                 print(f"  {tag} {disp:28s} | single L2 {row['single_l2']:.4f} | "
                       f"ens-mean L2 {row['ensemble_mean_l2']:.4f} | "
@@ -296,7 +315,9 @@ def main():
     if wb_run is not None:
         # Scalars go to the run SUMMARY (columns in the runs table), not log():
         # a one-shot eval otherwise creates one single-point chart per metric.
-        tbl = wandb.Table(columns=["ratio", "method", "l2", "spectrum_log_l1"])
+        tbl = wandb.Table(columns=["ratio", "method", "l2_normalized",
+                                   "l2_normalized_latweighted", "l2",
+                                   "spectrum_log_l1"])
         log = {}
         for tag, row in table.items():
             if tag == "ensemble":
@@ -306,9 +327,15 @@ def main():
                             wb_run.summary[f"ensemble/{etag}/{method}/{mk}"] = mv
                 continue
             for method, v in row.items():
-                tbl.add_data(tag, method, v["l2"], v["spectrum_log_l1"])
-                wb_run.summary[f"{tag}/{method}/l2"] = v["l2"]
-                wb_run.summary[f"{tag}/{method}/spectrum_log_l1"] = v["spectrum_log_l1"]
+                tbl.add_data(tag, method, v.get("l2_normalized"),
+                             v.get("l2_normalized_latweighted"), v["l2"],
+                             v["spectrum_log_l1"])
+                for mk, mv in v.items():
+                    if mk != "per_variable":
+                        wb_run.summary[f"{tag}/{method}/{mk}"] = mv
+                for vn, vv in v.get("per_variable", {}).items():
+                    for mk, mv in vv.items():
+                        wb_run.summary[f"{tag}/{method}/{vn}/{mk}"] = mv
         log["ablation/table"] = tbl
         log["ablation/spectrum"] = wandb.Image(str(results_dir / f"{stem}_spectrum.png"))
         for rc in cfg["sample"]["reconstructions"]:
