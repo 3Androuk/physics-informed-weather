@@ -274,8 +274,15 @@ def main():
                            project=args.project))
                     for m in range(args.ensemble)]
                 stack = torch.stack(members)
+                singles = [l2_norm(p, hf_e_phys) for p in members]
                 row = {
-                    "single_l2": float(np.mean([l2_norm(p, hf_e_phys) for p in members])),
+                    "single_l2": float(np.mean(singles)),
+                    # Sampling noise floor: spread of the single-sample score
+                    # across members of ONE model. Differences between
+                    # checkpoints smaller than ~2x this are not resolved.
+                    "single_l2_std": float(np.std(singles, ddof=1)),
+                    "single_l2_sem": float(np.std(singles, ddof=1)
+                                           / np.sqrt(len(singles))),
                     "ensemble_mean_l2": l2_norm(stack.mean(0), hf_e_phys),
                     "crps": crps_ensemble(members, hf_e_phys),
                     "spread": float(stack.std(0).mean()),
