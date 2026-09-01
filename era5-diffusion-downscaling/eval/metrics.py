@@ -28,6 +28,58 @@ def l2_norm(pred, truth) -> float:
     return float(per_sample.mean())
 
 
+def latitude_weights(lat) -> np.ndarray:
+    """Area weights cos(phi) for a lat-lon grid, normalized to unit mean.
+
+    `lat` is degrees, shape (H,) or (N, H). Equal-angle cells shrink poleward
+    as cos(latitude), so an unweighted grid mean over-counts high latitudes;
+    the WeatherBench2 convention normalizes cos(phi) to mean 1 so weighted and
+    unweighted scores are directly comparable in magnitude.
+    """
+    w = np.cos(np.deg2rad(np.asarray(lat, dtype=np.float64)))
+    w = np.clip(w, 0.0, None)
+    mean = w.mean(axis=-1, keepdims=True)
+    return w / np.where(mean > 0, mean, 1.0)
+
+
+def l2_norm_weighted(pred, truth, lat) -> float:
+    """Latitude-weighted RMSE: the standard WeatherBench2-style score.
+
+    Identical in form to `l2_norm` but each row is weighted by cos(latitude)
+    (unit mean), so a patch spanning many degrees is not dominated by its
+    poleward rows. `lat` is degrees, shape (H,) for a shared grid or (N, H)
+    for per-patch latitudes.
+    """
+    p, t = _to_numpy(pred), _to_numpy(truth)
+    w = latitude_weights(lat)
+    if w.ndim == 1:
+        w = np.broadcast_to(w, (p.shape[0], w.shape[0]))
+    if w.shape[0] != p.shape[0]:
+        raise ValueError(f"latitude rows {w.shape[0]} != samples {p.shape[0]}")
+    if w.shape[-1] != p.shape[-2]:
+        raise ValueError(f"latitude length {w.shape[-1]} != field height {p.shape[-2]}")
+    sq = ((p - t) ** 2).mean(axis=-1)              # (N, H) mean over longitude
+    per_sample = np.sqrt((sq * w).mean(axis=-1))   # weighted mean over latitude
+    return float(per_sample.mean())
+
+
+def patch_latitudes(patch_dir, n: int, size: int, split: str = "test") -> np.ndarray:
+    """Per-patch latitude rows (n, size) from saved origins + full-grid coords.
+
+    Returns None when the geo artifacts are absent (legacy patch dirs), so
+    callers can fall back to unweighted metrics.
+    """
+    from pathlib import Path
+    patch_dir = Path(patch_dir)
+    origins_path = patch_dir / f"{split}_origins.npy"
+    coords_path = patch_dir / "coords_full.npz"
+    if not (origins_path.exists() and coords_path.exists()):
+        return None
+    origins = np.load(origins_path)[:n]
+    lat_full = np.load(coords_path)["lat"]
+    return np.stack([lat_full[int(r):int(r) + size] for r, _ in origins])
+
+
 def radial_power_spectrum(fields):
     """Radially-averaged 2D power spectrum E(k).
 
