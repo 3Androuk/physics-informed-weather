@@ -127,9 +127,19 @@ def stitch_tiles(fn, lf_full: torch.Tensor, tile: int, overlap: int,
     return out / wsum
 
 
-def _project_final(out: torch.Tensor, coarse_full: torch.Tensor, ratio: int) -> torch.Tensor:
-    """Exact global block-average projection: coarsen(out) == observation."""
-    return out + upsample_nearest(coarse_full - coarsen(out, ratio), out.shape[-2:])
+def _project_final(out: torch.Tensor, coarse_full: torch.Tensor, ratio: int,
+                   observed=None) -> torch.Tensor:
+    """Exact global block-average projection: coarsen(out) == observation.
+
+    `observed` (optional bool per channel) restricts the projection to
+    channels carrying a real observation — unobserved (generated) channels
+    are left untouched."""
+    corr = upsample_nearest(coarse_full - coarsen(out, ratio), out.shape[-2:])
+    if observed is not None:
+        obs = torch.as_tensor(observed, dtype=torch.bool,
+                              device=out.device).view(1, -1, 1, 1)
+        corr = corr * obs
+    return out + corr
 
 
 @torch.no_grad()
@@ -137,7 +147,7 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
                                      recon_cfg, eta=0.0, tile=128, overlap=32,
                                      batch=8, geo_full=None, project_steps=False,
                                      project_final=True, generator=None,
-                                     covariance_projector=None):
+                                     covariance_projector=None, observed=None):
     """Tiled guided-diffusion reconstruction of one full field.
 
     lf_full: (1, C, H, W) noise-mixing guidance (globally degraded, normalized);
@@ -170,10 +180,11 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
         return diffusion.guided_reconstruct(
             model, x_g, t_steps=recon_cfg["t_steps"], K=K, eta=eta, cond=coords,
             project=project_steps, lf=lf_tiles, ratio=ratio, init_noise=eps,
-            covariance_projector=covariance_projector)
+            covariance_projector=covariance_projector, observed=observed)
 
     out = stitch_tiles(fn, lf_full, tile, overlap, align=ratio, batch=batch)
-    return _project_final(out, coarse_full, ratio) if project_final else out
+    return (_project_final(out, coarse_full, ratio, observed=observed)
+            if project_final else out)
 
 
 @torch.no_grad()

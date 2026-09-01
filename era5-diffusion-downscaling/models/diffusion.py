@@ -95,6 +95,7 @@ class GaussianDiffusion(nn.Module):
         covariance_init: bool = False,
         covariance_init_projector=None,
         dps_scale: float = 0.0,
+        observed: torch.Tensor = None,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -130,6 +131,16 @@ class GaussianDiffusion(nn.Module):
         gradient is computed on the unprojected estimate; exact consistency is
         restored after the final kick). Costs one backward pass per step.
 
+        `observed` (optional, bool per channel, length C) marks which channels
+        carry a real observation — channel-wise inpainting. Unobserved
+        channels get ZERO guidance at the first noise-mixing init (= sample
+        around the prior mean; later K loops refine them from the previous
+        reconstruction) and are excluded from projection and DPS, so the
+        model GENERATES them consistent with the observed ones. The operator
+        becomes A = coarsen . select-channels — linear, known only at
+        inference, so zero-shot is unchanged. Incompatible with the
+        covariance projector (which assumes all channels observed).
+
         Args:
             model: trained noise predictor eps_theta(x_t, t).
             x_guidance: (N, 1, H, W) low-fidelity guidance x^(g), already
@@ -158,7 +169,17 @@ class GaussianDiffusion(nn.Module):
         init_projector = covariance_init_projector or covariance_projector
         if covariance_init and init_projector is None:
             raise ValueError("covariance_init=True needs a covariance projector")
-        x_g = x_guidance
+        obs = None
+        if observed is not None:
+            assert covariance_projector is None and not covariance_init, (
+                "observed= is incompatible with covariance projection")
+            obs = torch.as_tensor(observed, dtype=torch.bool,
+                                  device=x_guidance.device)
+            assert obs.numel() == x_guidance.shape[1], (
+                f"observed has {obs.numel()} entries for "
+                f"{x_guidance.shape[1]} channels")
+            obs = None if bool(obs.all()) else obs.view(1, -1, 1, 1)
+        x_g = x_guidance if obs is None else x_guidance * obs
         device = x_guidance.device
         iterator = range(K)
         if progress:
@@ -200,7 +221,8 @@ class GaussianDiffusion(nn.Module):
                         eps_theta = (model(x_in, t_batch) if cond is None
                                      else model(x_in, t_batch, cond))
                         x0_pred = (x_in - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
-                        resid = (lf - coarsen(x0_pred, ratio)).flatten(1)
+                        resid = lf - coarsen(x0_pred, ratio)
+                        resid = (resid if obs is None else resid * obs).flatten(1)
                         dps_grad = torch.autograd.grad(
                             resid.norm(dim=1).sum(), x_in)[0]
                     eps_theta = eps_theta.detach()
@@ -210,8 +232,8 @@ class GaussianDiffusion(nn.Module):
                     x0_pred = (x - (1 - a_i).sqrt() * eps_theta) / a_i.sqrt()
                 if project:
                     if covariance_projector is None:
-                        x0_pred = x0_pred + upsample_nearest(
-                            lf - coarsen(x0_pred, ratio), hw)
+                        corr = upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
+                        x0_pred = x0_pred + (corr if obs is None else corr * obs)
                     else:
                         x0_pred = covariance_projector.project(x0_pred, lf, ratio)
                 sigma = eta * (
@@ -227,7 +249,8 @@ class GaussianDiffusion(nn.Module):
                     if project and tprev == 0:
                         # the final kick may leave the fibre; restore exactness
                         if covariance_projector is None:
-                            x = x + upsample_nearest(lf - coarsen(x, ratio), hw)
+                            corr = upsample_nearest(lf - coarsen(x, ratio), hw)
+                            x = x + (corr if obs is None else corr * obs)
                         else:
                             x = covariance_projector.project(x, lf, ratio)
 
