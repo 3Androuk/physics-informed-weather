@@ -33,10 +33,10 @@ coarse forecast products against paired truth.
 
 ### 1. Introduction — 2 pp
 - Fine-resolution fields are needed where fine-run compute or storage is
-  unavailable: modern coarse-RUN systems are ML/hybrid emulators
-  (NeuralGCM-ENS at 1.4°, ACE2 at 1°); coarse-DISSEMINATED products (1.5°
-  IFS grids in WB2) are what many users actually hold. One sentence: the
-  same need at climate scale (CMIP6 → CORDEX).
+  unavailable: many users hold only coarse-DISSEMINATED or archived
+  products (e.g. 1.5° forecast grids), and coarse-RUN systems exist at
+  the same scales (one clause; no claims about them until §9's tests).
+  One sentence: the same need at climate scale (CMIP6 → CORDEX).
 - The deliverable is a calibrated ensemble of plausible fine states, not a
   forecast — exactly as in dynamical downscaling.
 - The field has adopted guided diffusion with inference-time consistency
@@ -83,7 +83,7 @@ coarse forecast products against paired truth.
   why the NOISY state must NOT satisfy Ax_t = y (it would contradict the
   forward marginal the network was trained on) — the justification for
   projecting x̂₀, not x_t.
-- Projection (DDNM), and DPS likelihood guidance as the soft alternative.
+- Projection (DDNM) as the single data-consistency mechanism.
 - Channel-inpainting mask: A = coarsen ∘ select-channels; unobserved
   channels zero-guidance + excluded from projection → generated.
 - Conditional families in brief (flow matching, SI, residual, direct map)
@@ -116,8 +116,10 @@ coarse forecast products against paired truth.
   erases off-manifold detail; what survives is injected INFORMATION
   (which constraints) and ENERGY (at expected wavenumbers) — explains
   5.1–5.3 at once. Diagnostics figure (coherence + qq).
-- 5.5 Soft vs hard consistency: DPS sweep row [pending]; η sweep for the
-  ~20% underdispersion [pending]; spread-inflation as the analytic fix.
+- 5.5 Stochasticity and calibration: η sweep for the ~20%
+  underdispersion [pending]; spread-inflation as the analytic fix (cited,
+  consistency-preserving in ker A); no learned post-processors (ratio
+  leaks through training data).
 - 5.6 Physics vs observation, stated carefully: NOT substitutes (the
   ~linear hydrostatic relation decomposes across the same range/null
   split; projection pins block means only). Effect-size comparison at
@@ -202,7 +204,7 @@ coarse forecast products against paired truth.
 
 ## Supplement
 Level-gating details; covariance estimation numerics (detrend/Hann/
-Gaspari–Cohn) + isolation tests; corrector calibration; DPS sweep; training
+Gaspari–Cohn) + isolation tests; corrector calibration; training
 stability (width-128 lr collapse to the Var(ε) fixed point; divergence
 guard; best-by-val checkpoint); DDP; capacity matching per encoder;
 band-energy gate (H2CD); per-variable 20-var tables; hyperparameters.
@@ -220,7 +222,7 @@ RMSE/CRPS vs lead (fcst / control / bicubic). 9. Channel-inpainting panel
 - t2m ladder + anatomy re-run, spread selection + `--ensemble` noise floor
   → §5.1–5.3, §7 tables.
 - 8×/16× projection spot-check → §5.1 (else scope to 4×).
-- η sweep → §5.5; DPS sweep → §5.5; corrector gate → supplement.
+- η sweep → §5.5; corrector gate → supplement.
 - Hydrostatic residual diagnostic + constraint arms (20 var) → §5.6.
 - Shuffle-geo at 20 var → §7.
 - Fused/tiled numbers → §8.
