@@ -57,8 +57,24 @@ def _recon(diffusion, model, hf, ratio, rc, eta, coords, batch, label="recon",
     return torch.cat(outs, dim=0)
 
 
-def _payload(patch_dir, normalizer, n, geo_cfg, device):
-    """Geo payload stack for the first n test patches, per one model's config."""
+def _select_indices(total, n, contiguous=False):
+    """Which test patches to evaluate on.
+
+    The test split is stored in TIME ORDER (make_patches writes it with
+    shuffle=False), so range(n) is a contiguous window -- with per_field=8 over
+    731 daily fields, n=64 is the first 8 days of the record. Spread the
+    selection across the whole split instead, so the sample spans both test
+    years and every season.
+    """
+    if n >= total:
+        return np.arange(total)
+    if contiguous:
+        return np.arange(n)
+    return np.unique(np.linspace(0, total - 1, n).round().astype(int))
+
+
+def _payload(patch_dir, normalizer, sel, geo_cfg, device):
+    """Geo payload for test patches `sel`, per one model's config."""
     ds = PatchDataset(
         patch_dir / "test_patches.npy", normalizer,
         origins_path=patch_dir / "test_origins.npy",
@@ -68,7 +84,7 @@ def _payload(patch_dir, normalizer, n, geo_cfg, device):
         healpix_index_path=((patch_dir / geo_cfg["healpix_index"])
                             if geo_cfg.get("healpix_index") else None),
     )
-    return torch.stack([ds[i][1] for i in range(n)]).to(device)
+    return torch.stack([ds[int(i)][1] for i in sel]).to(device)
 
 
 def main():
@@ -83,6 +99,13 @@ def main():
     ap.add_argument("--base-ckpt", default="diffusion.pt",
                     help="legacy pair mode: model B (may be geo or plain)")
     ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--n-patches", type=int, default=None,
+                    help="override eval.n_test_patches")
+    ap.add_argument("--contiguous", action="store_true",
+                    help="take the FIRST n test patches instead of a uniform "
+                         "spread. The test split is in time order, so this is "
+                         "one contiguous window (n=64 -> 8 days). Only for "
+                         "reproducing results computed before the fix.")
     ap.add_argument("--wandb", action="store_true",
                     help="Enable wandb logging (overrides config wandb.enabled).")
     ap.add_argument("--project", action="store_true",
@@ -121,8 +144,13 @@ def main():
     ckpt_dir = Path(cfg["paths"]["ckpt_dir"])
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
     normalizer = load_norm_stats(patch_dir)
-    n = min(cfg["eval"]["n_test_patches"],
-            len(PatchDataset(patch_dir / "test_patches.npy", normalizer)))
+    total = len(PatchDataset(patch_dir / "test_patches.npy", normalizer))
+    sel = _select_indices(total, args.n_patches or cfg["eval"]["n_test_patches"],
+                          contiguous=args.contiguous)
+    n = len(sel)
+    print(f"evaluating {n} of {total} test patches "
+          f"({'first-N, contiguous' if args.contiguous else 'uniform spread'}), "
+          f"idx {sel[0]}..{sel[-1]}")
 
     # ── Load every checkpoint; each builds the geo payload ITS config needs ─
     ckpt_names = args.ckpts or [args.geo_ckpt, args.base_ckpt]
@@ -133,7 +161,7 @@ def main():
         model, diff, cfg_ck = load_diffusion(path, device)
         geo_on = cfg_ck.get("geo", {}).get("enabled", False)
         encoder = cfg_ck["geo"].get("encoder", "hash") if geo_on else "-"
-        coords = _payload(patch_dir, normalizer, n, cfg_ck["geo"], device) if geo_on else None
+        coords = _payload(patch_dir, normalizer, sel, cfg_ck["geo"], device) if geo_on else None
         disp = Path(name).stem
         if disp in seen:  # same stem from different directories
             seen[disp] += 1
@@ -165,11 +193,11 @@ def main():
         stem += f"_dps{args.dps:g}"
 
     ds_plain = PatchDataset(patch_dir / "test_patches.npy", normalizer)
-    hf = torch.stack([ds_plain[i] for i in range(n)]).to(device)
+    hf = torch.stack([ds_plain[int(i)] for i in sel]).to(device)
     hf_phys = normalizer.decode(hf.cpu())
     # Latitude-weighted RMSE (WeatherBench2 convention) alongside plain L2;
     # None on legacy patch dirs without saved origins/coords.
-    lat = patch_latitudes(patch_dir, n, hf.shape[-2])
+    lat = patch_latitudes(patch_dir, sel, hf.shape[-2])
     if lat is None:
         print("  (no origins/coords_full.npz — latitude-weighted RMSE skipped)")
 
@@ -239,7 +267,11 @@ def main():
         table["ensemble"] = ens
 
     with open(results_dir / f"{stem}.json", "w") as f:
-        json.dump(table, f, indent=2)
+        json.dump({**table,
+                   "_meta": {"patch_indices": [int(i) for i in sel],
+                             "n_patches": n, "total_test_patches": total,
+                             "contiguous": bool(args.contiguous)}},
+                  f, indent=2)
     _plot(spectra, results_dir / f"{stem}_spectrum.png")
     print(f"\nSaved -> {results_dir / stem}.json, {stem}_spectrum.png, "
           f"and {stem}_qualitative_*.png")
