@@ -115,21 +115,38 @@ restores. The live levers of the sampler are the information injected and
 the schedule on which it is injected; per-step statistical refinements
 between those injections are erased.
 
-This principle motivates a conjecture we state explicitly, since the
-project's framing is physics-informed generation. In generative
-downscaling at mesoscale resolution, the most valuable physics is not an
-approximate dynamical residual imposed as a soft penalty — the w-weighted
-PDE guidance of Shu et al. (2023), which we run at w = 0 throughout — but
-the exact linear conservation law already embedded in the degradation
-operator: block means are the conservative remap, and enforcing them
-exactly is worth a factor of two. Soft approximate physics competes for
-the same budget and, on the evidence of 5.2, its per-step corrections are
-substantially erased. The direct test — approximate-physics guidance
-(specific-humidity positivity; the hydrostatic thickness relation between
-z500 − z850 and layer-mean temperature) inserted in the same plug-in slot,
-compared against projection-only and both — requires the multivariate
-checkpoints of Section 8 and is reported there [pending: §8 conjecture
-test].
+This principle motivates a question we state carefully, since the project's
+framing is physics-informed generation: at inference time, where does the
+useful constraint information actually come from?
+
+Two candidate constraints are available, and it is important that they are
+**not substitutes**. The observation constraint fixes the range of A — the
+block means — and says nothing about relations among channels. The
+hydrostatic relation between thickness (z500 − z850) and layer-mean
+temperature is, to good approximation, linear with constant coefficients,
+so it decomposes across the same range/null split: it constrains both the
+observed and the unobserved component, and enforcing it does not pin block
+means. Projection and physics therefore act on largely orthogonal
+subspaces, and the meaningful comparison is one of **effect size**, not of
+one mechanism replacing the other.
+
+Our hypothesis is that at this resolution the observation constraint
+dominates, for a specific and testable reason: the training data satisfy
+the hydrostatic relation to within the reanalysis's own residual, so a
+converged model has already internalized it, whereas the observation is
+information the model cannot possess. If so, an inference-time physics
+correction has little left to fix, while the projection injects content the
+chain would otherwise forget. Section 8 reports the decisive diagnostic —
+the hydrostatic residual of unconstrained model samples measured against
+the residual of ERA5 itself — alongside the constrained arms
+[pending: §8]. Two scope limits apply and are stated rather than
+finessed. First, this concerns constraints applied at **inference**; we do
+not test physics in the training objective, and claim nothing about it.
+Second, because §5.4's erasure principle predicts that any per-step
+correction is partly erased, a null result for inference-time physics is
+evidence about the inference slot, not about physical constraints in
+general — which is exactly why the residual diagnostic, not the metric
+delta alone, carries the argument.
 
 ### 5.5 Stochasticity and calibration
 
