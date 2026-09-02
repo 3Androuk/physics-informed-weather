@@ -74,6 +74,9 @@ def main():
                          "(and in direct mode): anchors all tiles' low frequencies "
                          "to the shared observation throughout sampling, "
                          "suppressing tile-scale seams at weak ratios (e.g. 8x)")
+    ap.add_argument("--eta", type=float, default=None,
+                    help="override sample.ddim_eta (eta>0 = stochastic DDIM; "
+                         "measured a Pareto win to ~1.5 on this model)")
     ap.add_argument("--ensemble", type=int, default=1,
                     help="reconstruct each stochastic method N times per field "
                          "and also score the ensemble mean. N=1 reproduces the "
@@ -93,7 +96,9 @@ def main():
     results_dir = ensure_dir(Path(cfg["paths"]["results_dir"]) / "full_field")
     normalizer = load_norm_stats(patch_dir)
     tile = args.tile or cfg["patches"]["size"]
-    eta = cfg["sample"]["ddim_eta"]
+    eta = (cfg["sample"]["ddim_eta"] if args.eta is None
+           else float(args.eta))
+    print(f"ddim_eta = {eta}" + (" (override)" if args.eta is not None else ""))
     recons = {rc["ratio"]: rc for rc in cfg["sample"]["reconstructions"]}
     align = 16
     for r in recons:

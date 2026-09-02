@@ -96,6 +96,7 @@ class GaussianDiffusion(nn.Module):
         covariance_init_projector=None,
         dps_scale: float = 0.0,
         observed: torch.Tensor = None,
+        obs_noise: float = 0.0,
     ) -> torch.Tensor:
         """Reconstruct a high-fidelity field from a noise-mixed LF guidance.
 
@@ -233,6 +234,14 @@ class GaussianDiffusion(nn.Module):
                 if project:
                     if covariance_projector is None:
                         corr = upsample_nearest(lf - coarsen(x0_pred, ratio), hw)
+                        if obs_noise > 0:
+                            # DDNM+ : y is noisy (a forecast), so do not force
+                            # exact consistency. A is r x r block-averaging with
+                            # singular value 1/r, so the per-mode rule
+                            # lambda = min(1, sigma_t * s / sigma_y) is a scalar.
+                            sig_t = ((1 - a_i).sqrt() / a_i.sqrt())
+                            lam = torch.clamp(sig_t / (ratio * obs_noise), max=1.0)
+                            corr = corr * lam
                         x0_pred = x0_pred + (corr if obs is None else corr * obs)
                     else:
                         x0_pred = covariance_projector.project(x0_pred, lf, ratio)
@@ -250,6 +259,11 @@ class GaussianDiffusion(nn.Module):
                         # the final kick may leave the fibre; restore exactness
                         if covariance_projector is None:
                             corr = upsample_nearest(lf - coarsen(x, ratio), hw)
+                            if obs_noise > 0:   # DDNM+: y is noisy, stay soft
+                                corr = corr * torch.clamp(
+                                    torch.as_tensor(1.0 / (ratio * obs_noise),
+                                                    device=corr.device),
+                                    max=1.0)
                             x = x + (corr if obs is None else corr * obs)
                         else:
                             x = covariance_projector.project(x, lf, ratio)

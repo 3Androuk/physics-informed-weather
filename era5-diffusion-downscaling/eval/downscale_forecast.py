@@ -63,6 +63,16 @@ def main():
     ap.add_argument("--tile", type=int, default=128)
     ap.add_argument("--overlap", type=int, default=32)
     ap.add_argument("--batch-tiles", type=int, default=8)
+    ap.add_argument("--obs-noise", default="0",
+                    help="DDNM+ observation noise sigma_y in NORMALIZED "
+                         "units; 0 = plain DDNM (exact consistency). "
+                         "'auto' measures RMS(coarsen(truth) - fcst) "
+                         "at this lead — the coarse-scale forecast error.")
+    ap.add_argument("--no-project", action="store_true",
+                    help="drop DDNM entirely: the coarse field steers the\n"
+                         "chain via noise-mixing but is never enforced. On a\n"
+                         "NOISY observation this stops forecast error being\n"
+                         "reproduced exactly (lambda = 0 in the DDNM+ family).")
     ap.add_argument("--control", action="store_true",
                     help="also downscale coarsened truth with the same seeds "
                          "(isolates forecast error from downscaling error)")
@@ -100,13 +110,36 @@ def main():
           f"observed {int(obs.sum())}/{len(obs)}; eta {eta:g}"
           f"{'; control ON' if args.control else ''}")
 
+    # ---- DDNM+ observation noise -------------------------------------
+    # y here is a FORECAST, not a noiseless block-average of the truth, so
+    # exact consistency would imprint forecast error. sigma_y is measured in
+    # NORMALIZED units as the coarse-scale forecast error at this lead.
+    if str(args.obs_noise).lower() == "auto":
+        k = min(n, 16)
+        errs = []
+        for j in range(k):
+            t_n = normalizer.encode(torch.from_numpy(np.array(tr[j:j + 1])).float())
+            c_n = normalizer.encode(torch.from_numpy(np.array(fc[j, 0][None])).float())
+            errs.append((coarsen(t_n, ratio) - c_n).pow(2).mean().item())
+        obs_noise = float(np.sqrt(np.mean(errs)))
+        print(f"  DDNM+ sigma_y (auto, {k} inits) = {obs_noise:.4f} normalized units")
+    else:
+        obs_noise = float(args.obs_noise)
+        if obs_noise > 0:
+            print(f"  DDNM+ sigma_y = {obs_noise:.4f} normalized units")
+
     def run(coarse_norm, seed):
         lf = upsample_nearest(coarse_norm, tuple(tr.shape[-2:]))
-        gen = torch.Generator(device=device).manual_seed(seed)
+        # CPU generator: sample/full_field._global_noise draws the shared
+        # global noise on CPU so a seed is device-independent, and torch
+        # requires the generator's device to match the creation device.
+        gen = torch.Generator().manual_seed(seed)
         return reconstruct_full_tiled_diffusion(
             diffusion, model, lf, coarse_norm, ratio, rc, eta=eta,
             tile=args.tile, overlap=args.overlap, batch=args.batch_tiles,
-            geo_full=geo_full, project_steps=True, generator=gen,
+            geo_full=geo_full, project_steps=not args.no_project,
+            project_final=not args.no_project, generator=gen,
+            obs_noise=obs_noise,
             observed=obs).cpu()
 
     sums = {k: None for k in ("fcst", "bicubic", "control")}
@@ -160,7 +193,10 @@ def main():
             crps_ensemble(ms, t) for ms, t in zip(crps_members, crps_truth)]))
 
     results_dir = ensure_dir(cfg["paths"]["results_dir"])
-    stem = f"forecast_{args.lead}h_{Path(args.ckpt).stem}"
+    # encode the consistency arm, or arms overwrite each other
+    arm = ("noproj" if args.no_project
+           else "ddnm" if obs_noise <= 0 else f"ddnmplus{obs_noise:.3f}")
+    stem = f"forecast_{args.lead}h_{Path(args.ckpt).stem}_{arm}"
     with open(results_dir / f"{stem}.json", "w") as f:
         json.dump(out, f, indent=2)
     print(json.dumps(out["rmse_latweighted"], indent=2)[:2000])

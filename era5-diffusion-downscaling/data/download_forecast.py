@@ -111,7 +111,11 @@ def _regrid(da, lat_c: np.ndarray, lon_c: np.ndarray):
     pad = da.isel({lon_n: 0})
     pad = pad.assign_coords({lon_n: float(da[lon_n][0]) + 360.0})
     da = xr.concat([da, pad], dim=lon_n)
-    return da.interp({lat_n: lat_c, lon_n: lon_c % 360.0}, method="linear")
+    out = da.interp({lat_n: lat_c, lon_n: lon_c % 360.0}, method="linear")
+    # interp preserves the SOURCE dim order, and the HRES store is
+    # (time, longitude, latitude) — pin (lat, lon) so the memmap assignment
+    # below cannot silently transpose the field.
+    return out.transpose(..., lat_n, lon_n)
 
 
 def main():
@@ -214,6 +218,7 @@ def main():
                 for i, tv in enumerate(valid):
                     field = da.sel(time=tv).sel(
                         latitude=fine_lat[:hf_h], longitude=fine_lon[:hf_w])
+                    field = field.transpose(..., "latitude", "longitude")
                     tr[i, c] = np.asarray(field.values, dtype=np.float32)
             tr.flush()
 

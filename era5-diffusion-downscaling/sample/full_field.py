@@ -147,7 +147,8 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
                                      recon_cfg, eta=0.0, tile=128, overlap=32,
                                      batch=8, geo_full=None, project_steps=False,
                                      project_final=True, generator=None,
-                                     covariance_projector=None, observed=None):
+                                     covariance_projector=None, observed=None,
+                                     obs_noise=0.0):
     """Tiled guided-diffusion reconstruction of one full field.
 
     lf_full: (1, C, H, W) noise-mixing guidance (globally degraded, normalized);
@@ -180,10 +181,14 @@ def reconstruct_full_tiled_diffusion(diffusion, model, lf_full, coarse_full, rat
         return diffusion.guided_reconstruct(
             model, x_g, t_steps=recon_cfg["t_steps"], K=K, eta=eta, cond=coords,
             project=project_steps, lf=lf_tiles, ratio=ratio, init_noise=eps,
-            covariance_projector=covariance_projector, observed=observed)
+            covariance_projector=covariance_projector, observed=observed, obs_noise=obs_noise)
 
     out = stitch_tiles(fn, lf_full, tile, overlap, align=ratio, batch=batch)
-    return (_project_final(out, coarse_full, ratio, observed=observed)
+    return ((_project_final(out, coarse_full, ratio, observed=observed)
+             # DDNM+: with a NOISY observation the final hard projection
+             # would force exact consistency with an erroneous y and undo
+             # every softened step before it — so skip it.
+             if obs_noise <= 0 else out)
             if project_final else out)
 
 
