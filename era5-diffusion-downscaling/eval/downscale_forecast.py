@@ -33,8 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.dataset import load_norm_stats  # noqa: E402
 from data.degrade import coarsen, upsample_nearest  # noqa: E402
 from eval.metrics import crps_ensemble, spectrum_log_l1  # noqa: E402
-from sample.full_field import reconstruct_full_tiled_diffusion  # noqa: E402
-from sample.reconstruct import load_diffusion  # noqa: E402
+from sample.full_field import (reconstruct_full_tiled_diffusion,  # noqa: E402
+                               reconstruct_full_tiled_directmap,
+                               reconstruct_full_tiled_transport)
+from sample.reconstruct import (load_diffusion, load_directmap,  # noqa: E402
+                                load_residual)
+from sample.transport import load_transport  # noqa: E402
 from utils import ensure_dir, get_device, load_config  # noqa: E402
 
 
@@ -98,13 +102,49 @@ def main():
 
     patch_dir = Path(cfg["paths"]["patch_dir"])
     normalizer = load_norm_stats(patch_dir)
-    model, diffusion, cfg_ck = load_diffusion(
-        Path(cfg["paths"]["ckpt_dir"]) / args.ckpt, device)
+    # ---- dispatch on checkpoint kind ---------------------------------
+    ck_path = Path(cfg["paths"]["ckpt_dir"]) / args.ckpt
+    stem = ck_path.stem
+    if stem.startswith(("flow_matching", "stochastic_interpolant")):
+        kind = "transport"
+        model, process, cfg_ck, method, residual = load_transport(ck_path, device)
+        if residual is not None and residual["mean_geo"]:
+            raise SystemExit(
+                f"{args.ckpt} uses a GEO-conditioned frozen mean; the coords "
+                "payload for it is not built here yet. Use a non-geo residual "
+                "checkpoint (meanmap.pt).")
+        if residual is not None:
+            print(f"  residual transport: res_std={residual['res_std']:.4f} "
+                  f"consistent_mean={residual.get('consistent_mean')} "
+                  f"null_space={residual.get('null_space')}")
+        diffusion = None
+    elif stem.startswith("residual"):
+        kind = "residual"
+        (model, diffusion, cfg_ck, res_std,
+         res_mean_model, res_mean_geo) = load_residual(ck_path, device)
+        if res_mean_geo:
+            raise SystemExit(f"{args.ckpt} has a GEO-conditioned mean; coords "
+                             "payload for it is not built here yet.")
+        process = method = None
+        print(f"  residual diffusion: res_std={res_std:.4f} "
+              f"mean={'learned' if res_mean_model is not None else 'bicubic'}")
+    elif stem.startswith("directmap"):
+        kind = "directmap"
+        model, cfg_ck = load_directmap(ck_path, device)
+        diffusion = process = method = None
+    else:
+        kind = "diffusion"
+        model, diffusion, cfg_ck = load_diffusion(ck_path, device)
+        process = method = None
+    print(f"  checkpoint kind: {kind}")
     geo_full = None
     if cfg_ck.get("geo", {}).get("enabled", False):
         from eval.full_field import _geo_full
         geo_full = _geo_full(cfg_ck, patch_dir, tuple(tr.shape[-2:]), device)
 
+    if kind == "directmap" and args.ensemble > 1:
+        print("  direct map is deterministic -> forcing --ensemble 1")
+        args.ensemble = 1
     print(f"{args.lead}h: {n} inits x {n_real} forecast member(s) x "
           f"{args.ensemble} sampler member(s); ratio {ratio}; "
           f"observed {int(obs.sum())}/{len(obs)}; eta {eta:g}"
@@ -128,12 +168,88 @@ def main():
         if obs_noise > 0:
             print(f"  DDNM+ sigma_y = {obs_noise:.4f} normalized units")
 
+    def _mean_from_coarse(coarse_norm, lf_up):
+        """Frozen mean for residual transports, driven by the COARSE FORECAST.
+
+        eval/full_field._mean_full feeds the mean model degrade(hf, ratio) --
+        the coarse field nearest-upsampled. At deployment that same object is
+        `lf_up` (from the forecast rather than the truth), so the mean model
+        sees exactly the input distribution it was trained on; only the
+        provenance differs. Bicubic fallback matches _mean_full's.
+        """
+        m = residual["mean_model"]
+        if m is not None:
+            # no_grad: this is a FULL-FIELD (480x1440) forward pass and the
+            # sampler's own @torch.no_grad does not cover it, so autograd was
+            # building a graph over it -> OOM.
+            with torch.no_grad():
+                return m(lf_up)
+        return torch.nn.functional.interpolate(
+            coarse_norm, size=tuple(tr.shape[-2:]), mode="bicubic",
+            align_corners=False)
+
     def run(coarse_norm, seed):
         lf = upsample_nearest(coarse_norm, tuple(tr.shape[-2:]))
         # CPU generator: sample/full_field._global_noise draws the shared
         # global noise on CPU so a seed is device-independent, and torch
         # requires the generator's device to match the creation device.
         gen = torch.Generator().manual_seed(seed)
+        if kind == "residual":
+            # Split model: deterministic mean + sampled residual. Everything
+            # reconstruct_residual takes from the truth is coarse-derived
+            # (coarsen(hf) and degrade(hf)), so at deployment the forecast
+            # supplies both: coarse_norm and its upsample lf.
+            hw = tuple(tr.shape[-2:])
+            with torch.no_grad():
+                if res_mean_model is not None:
+                    mean_f = res_mean_model(lf)
+                else:
+                    mean_f = torch.nn.functional.interpolate(
+                        coarse_norm, size=hw, mode="bicubic", align_corners=False)
+                torch.manual_seed(seed)          # sample_unconditional has no generator arg
+                res = diffusion.sample_unconditional(
+                    model, mean_f.shape, mean_f.device,
+                    n_steps=cfg["sample"].get("n_steps", 100),
+                    cond=(mean_f, None))
+                out = mean_f + res_std * res
+                if not args.no_project:
+                    corr = upsample_nearest(coarse_norm - coarsen(out, ratio), hw)
+                    if not bool(obs.all()):
+                        corr = corr * obs.view(1, -1, 1, 1).to(corr.device)
+                    out = out + corr
+            return out.cpu()
+        if kind == "directmap":
+            return reconstruct_full_tiled_directmap(
+                model, lf, tile=args.tile, overlap=args.overlap,
+                batch=args.batch_tiles, geo_full=geo_full).cpu()
+        if kind == "transport":
+            tc = cfg_ck.get("transport", {})
+            kw = {}
+            if method == "stochastic_interpolant":
+                si = tc.get("stochastic_interpolant", {})
+                kw = dict(sampler=si.get("sampler", "ode"),
+                          stochasticity=si.get("stochasticity", 0.1))
+            # Residual checkpoints condition on the frozen mean and sample the
+            # NORMALIZED residual: coarsen(x) == y holds only for the composed
+            # field, so no projection happens inside the sampler.
+            cond_full = lf if residual is None else _mean_from_coarse(coarse_norm, lf)
+            inner = (not args.no_project) and residual is None
+            out = reconstruct_full_tiled_transport(
+                model, process, cond_full, coarse_norm, ratio, cfg_ck, method,
+                tile=args.tile, overlap=args.overlap, batch=args.batch_tiles,
+                geo_full=geo_full, project_final=inner,
+                project_each=inner, generator=gen, **kw)
+            if residual is not None:
+                out = cond_full + residual["res_std"] * out
+                if not args.no_project:      # project the COMPOSED field
+                    corr = upsample_nearest(
+                        coarse_norm - coarsen(out, ratio), tuple(tr.shape[-2:]))
+                    # same convention as the sampler: (C,) -> (1,C,1,1), and
+                    # no mask at all when every channel is observed.
+                    if not bool(obs.all()):
+                        corr = corr * obs.view(1, -1, 1, 1).to(corr.device)
+                    out = out + corr
+            return out.cpu()
         return reconstruct_full_tiled_diffusion(
             diffusion, model, lf, coarse_norm, ratio, rc, eta=eta,
             tile=args.tile, overlap=args.overlap, batch=args.batch_tiles,
