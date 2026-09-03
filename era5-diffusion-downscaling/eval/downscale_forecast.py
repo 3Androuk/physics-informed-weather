@@ -72,6 +72,10 @@ def main():
                          "units; 0 = plain DDNM (exact consistency). "
                          "'auto' measures RMS(coarsen(truth) - fcst) "
                          "at this lead — the coarse-scale forecast error.")
+    ap.add_argument("--save-members", default=None,
+                    help="directory: save each init's (M,C,H,W) member stack as "
+                         "float16 .npy so post-processing (variance inflation, "
+                         "alpha sweeps) can be applied offline without resampling.")
     ap.add_argument("--no-project", action="store_true",
                     help="drop DDNM entirely: the coarse field steers the\n"
                          "chain via noise-mixing but is never enforced. On a\n"
@@ -274,6 +278,10 @@ def main():
                 out_n = run(coarse_n, seed=i * 1000 + r * 100 + e)
                 members.append(normalizer.decode(out_n))
         stack = torch.stack(members)                       # (M, 1, C, H, W)
+        if args.save_members:
+            sd = Path(args.save_members); sd.mkdir(parents=True, exist_ok=True)
+            np.save(sd / f"members_{args.lead}h_init{i:02d}.npy",
+                    stack[:, 0].half().cpu().numpy())
         pred = stack.mean(0) if len(members) > 1 else stack[0]
 
         bic = normalizer.decode(torch.nn.functional.interpolate(
@@ -312,7 +320,10 @@ def main():
     # encode the consistency arm, or arms overwrite each other
     arm = ("noproj" if args.no_project
            else "ddnm" if obs_noise <= 0 else f"ddnmplus{obs_noise:.3f}")
-    stem = f"forecast_{args.lead}h_{Path(args.ckpt).stem}_{arm}"
+    # eta must be in the stem too: the eta=1.5 combo run silently overwrote
+    # the eta=0 combo JSON (same ckpt, same arm).
+    stem = (f"forecast_{args.lead}h_{Path(args.ckpt).stem}_{arm}"
+            + (f"_eta{eta:g}" if eta else ""))
     with open(results_dir / f"{stem}.json", "w") as f:
         json.dump(out, f, indent=2)
     print(json.dumps(out["rmse_latweighted"], indent=2)[:2000])

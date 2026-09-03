@@ -53,6 +53,9 @@ def parse(path):
     m = re.match(r"forecast_(\d+)h_(.*)$", stem)
     lead, rest = m.group(1), m.group(2)
     arm = None
+    me = re.search(r"_eta[0-9.]+$", rest)      # strip the eta suffix first
+    if me:
+        rest = rest[: me.start()]
     for a in ("noproj", "ddnm"):
         if rest.endswith("_" + a):
             arm, rest = a, rest[: -len(a) - 1]
@@ -180,6 +183,35 @@ def main():
              "both lose to guided diffusion on the control, SI badly.")
     L.append("- **Residual diffusion** is projected once on the *composed* field (per its original "
              "`reconstruct_residual`), not per step — not strictly like-for-like on consistency.\n")
+    infl = sorted(glob.glob(str(RES / "members" / "*" / "inflation_*h.json")))
+    if infl:
+        L.append("## Variance inflation (post-processing, no resampling)\n")
+        L.append("`x_i ← μ + α(x_i − μ)`: ensemble mean, RMSE and spectrum unchanged; "
+                 "deviations already lie in ker A so consistency is preserved. Raw ensembles span "
+                 "*downscaling* uncertainty only, hence the small spread/reliable ratios. "
+                 "α* is in-sample (oracle); the cross-lead column applies the OTHER lead's α*.\n")
+        L.append("| arm | lead | raw CRPS | spread/reliable (raw) | α* | CRPS at α* | Δ vs raw | Δ vs native (MAE) | calibrated α | cross-lead α → CRPS |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        by_arm = {}
+        for f in infl:
+            d = json.loads(Path(f).read_text()); arm = Path(f).parent.name
+            by_arm.setdefault(arm, {})[str(d["lead_h"])] = d
+        for arm, leads_d in sorted(by_arm.items()):
+            for lead, d in sorted(leads_d.items(), key=lambda kv: int(kv[0])):
+                rows_ = {r["alpha"]: r for r in d["rows"]}
+                raw = rows_[1.0]
+                other = [v for k, v in leads_d.items() if k != lead]
+                xl = "—"
+                if other:
+                    oa = other[0]["oracle_alpha"]
+                    if oa in rows_:
+                        xl = f"α={oa:g} → {rows_[oa]['crps']:.4f} ({pct(rows_[oa]['crps'], raw['crps'])})"
+                nmae = native.get(lead, {}).get("native_mae_latweighted")
+                L.append(f"| {arm} | {lead} h | {raw['crps']:.4f} | {raw['spread_ratio']:.2f} | "
+                         f"{d['oracle_alpha']:g} | **{d['oracle_crps']:.4f}** | "
+                         f"{pct(d['oracle_crps'], raw['crps'])} | {pct(d['oracle_crps'], nmae)} | "
+                         f"{d['calibrated_alpha']:g} | {xl} |")
+        L.append("")
     L.append("## Arm status (from `logs_fcst_*.log`)\n")
     L += status_lines()
     L.append("")
